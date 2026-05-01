@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS repos (
     -- last_indexed_at, so the dashboard's "Indexed N ago" reflects actual
     -- indexing, not housekeeping.
     last_indexed_at REAL NOT NULL DEFAULT 0,
+    -- Team coding conventions extracted from CONTRIBUTING.md / AGENTS.md /
+    -- etc. at indexing time; injected into review prompts so Mira flags
+    -- team-specific violations (not just generic best-practices).
+    conventions TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (owner, repo)
 );
 
@@ -115,6 +119,8 @@ CREATE TABLE IF NOT EXISTS repos (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     -- Distinct from updated_at: only set when a real indexing run finishes.
     last_indexed_at TIMESTAMPTZ,
+    -- Team coding conventions extracted at indexing time.
+    conventions TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (owner, repo)
 );
 
@@ -213,6 +219,7 @@ class RepoRecord:
     created_at: float = 0.0
     updated_at: float = 0.0
     last_indexed_at: float = 0.0  # 0.0 means never
+    conventions: str = ""
 
 
 def _hash_password(password: str) -> str:
@@ -260,6 +267,10 @@ class AppDatabase:
             self._sqlite_conn.execute(
                 "ALTER TABLE repos ADD COLUMN last_indexed_at REAL NOT NULL DEFAULT 0"
             )
+        if "conventions" not in cols:
+            self._sqlite_conn.execute(
+                "ALTER TABLE repos ADD COLUMN conventions TEXT NOT NULL DEFAULT ''"
+            )
         self._sqlite_conn.commit()
         logger.info("App database: SQLite at %s", db_path)
 
@@ -275,6 +286,9 @@ class AppDatabase:
                 # Lightweight migration for columns added after launch.
                 cur.execute(
                     "ALTER TABLE repos ADD COLUMN IF NOT EXISTS last_indexed_at TIMESTAMPTZ"
+                )
+                cur.execute(
+                    "ALTER TABLE repos ADD COLUMN IF NOT EXISTS conventions TEXT NOT NULL DEFAULT ''"
                 )
             logger.info("App database: PostgreSQL")
         except ImportError:
@@ -644,7 +658,7 @@ class AppDatabase:
             assert self._sqlite_conn is not None
             rows = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions "
                 "FROM repos ORDER BY owner, repo"
             ).fetchall()
             return [
@@ -660,6 +674,7 @@ class AppDatabase:
                     created_at=r[8],
                     updated_at=r[9],
                     last_indexed_at=r[10] or 0.0,
+                    conventions=r[11] or "",
                 )
                 for r in rows
             ]
@@ -667,7 +682,7 @@ class AppDatabase:
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions "
                 "FROM repos ORDER BY owner, repo"
             )
             return [
@@ -683,6 +698,7 @@ class AppDatabase:
                     created_at=r[8].timestamp() if r[8] else 0.0,
                     updated_at=r[9].timestamp() if r[9] else 0.0,
                     last_indexed_at=r[10].timestamp() if r[10] else 0.0,
+                    conventions=r[11] or "",
                 )
                 for r in cur.fetchall()
             ]
@@ -692,7 +708,7 @@ class AppDatabase:
             assert self._sqlite_conn is not None
             row = self._sqlite_conn.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions "
                 "FROM repos WHERE owner=? AND repo=?",
                 (owner, repo),
             ).fetchone()
@@ -709,13 +725,14 @@ class AppDatabase:
                     created_at=row[8],
                     updated_at=row[9],
                     last_indexed_at=row[10] or 0.0,
+                    conventions=row[11] or "",
                 )
             return None
         assert self._pg_conn is not None
         with self._pg_conn.cursor() as cur:
             cur.execute(
                 "SELECT owner, repo, status, index_mode, files_indexed, file_count_estimate, "
-                "error, installation_id, created_at, updated_at, last_indexed_at "
+                "error, installation_id, created_at, updated_at, last_indexed_at, conventions "
                 "FROM repos WHERE owner=%s AND repo=%s",
                 (owner, repo),
             )
@@ -735,8 +752,27 @@ class AppDatabase:
                     created_at=row[8].timestamp() if row[8] else 0.0,
                     updated_at=row[9].timestamp() if row[9] else 0.0,
                     last_indexed_at=row[10].timestamp() if row[10] else 0.0,
+                    conventions=row[11] or "",
                 )
             return None
+
+    def set_repo_conventions(self, owner: str, repo: str, conventions: str) -> None:
+        """Store the team-conventions string for a repo. Called by the
+        indexer after extracting from CONTRIBUTING.md / AGENTS.md / etc."""
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            self._sqlite_conn.execute(
+                "UPDATE repos SET conventions=? WHERE owner=? AND repo=?",
+                (conventions, owner, repo),
+            )
+            self._sqlite_conn.commit()
+        else:
+            assert self._pg_conn is not None
+            with self._pg_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE repos SET conventions=%s WHERE owner=%s AND repo=%s",
+                    (conventions, owner, repo),
+                )
 
     # ── Settings ──
 

@@ -78,18 +78,38 @@ def _deduplicate(
     return kept
 
 
-def filter_noise(comments: list[ReviewComment], config: FilterConfig) -> list[ReviewComment]:
+def filter_noise(
+    comments: list[ReviewComment],
+    config: FilterConfig,
+    review_round: int = 1,
+) -> list[ReviewComment]:
     """Apply the full noise filtering pipeline.
 
-    1. Drop below confidence threshold
-    2. Drop below minimum severity
+    1. Drop below confidence threshold (escalates per ``review_round``)
+    2. Drop below minimum severity (escalates per ``review_round``)
     3. Sort by severity (desc) then confidence (desc)
     4. Deduplicate (first occurrence = highest quality)
     5. Cap at max_comments
+
+    ``review_round`` is the 1-indexed count of bot reviews on this PR.
+    Round 1 uses ``config`` defaults; round 2+ raise the floor so the bot
+    converges quickly across follow-up pushes — the principle being
+    "round 1 sets the bar; later rounds only flag new high-confidence
+    findings, typically bugs the team introduced while applying fixes."
     """
+    confidence_floor = config.confidence_threshold
     min_severity = Severity.from_str(config.min_severity)
 
-    result = [c for c in comments if c.confidence >= config.confidence_threshold]
+    if review_round >= 2:
+        # Tighten without dropping real catches: confident bugs are scored
+        # 0.85+ by the LLM, so 0.8 still lets them through while filtering
+        # the marginal/hedged ones.
+        confidence_floor = max(confidence_floor, 0.8)
+        min_severity = max(min_severity, Severity.WARNING)
+    if review_round >= 3:
+        confidence_floor = max(confidence_floor, 0.85)
+
+    result = [c for c in comments if c.confidence >= confidence_floor]
     result = [c for c in result if c.severity >= min_severity]
     result.sort(key=lambda c: (c.severity, c.confidence), reverse=True)
     result = _deduplicate(result)

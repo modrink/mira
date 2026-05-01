@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 
@@ -147,6 +148,55 @@ def _number_lines(content: str) -> str:
     return "\n".join(f"{i + 1:>{width}}| {line}" for i, line in enumerate(lines))
 
 
+_ORPHAN_LINE_TOLERANCE = 3
+
+
+def _drop_orphan_key_issues(
+    key_issues: list[KeyIssue],
+    final_comments: list[ReviewComment],
+) -> list[KeyIssue]:
+    """Drop key_issues whose inline comment didn't survive filtering.
+
+    The LLM emits ``key_issues`` and ``comments`` as independent arrays in
+    ``submit_review``, so a key_issue can outlive the comment it points to
+    after noise filtering or self-critique drops the inline. Keep only
+    key_issues that point near a surviving comment so the Walkthrough's
+    "Key Issues" table stays in sync with what actually got posted.
+
+    A small ±_ORPHAN_LINE_TOLERANCE line tolerance is applied because the
+    LLM sometimes picks the function/header line for a key_issue while
+    filing the inline at the actual problem line a few lines below.
+    """
+    by_path: dict[str, list[tuple[int, int]]] = {}
+    for c in final_comments:
+        start = c.line - _ORPHAN_LINE_TOLERANCE
+        end = (c.end_line or c.line) + _ORPHAN_LINE_TOLERANCE
+        by_path.setdefault(c.path, []).append((start, end))
+
+    def _matches(ki: KeyIssue) -> bool:
+        return any(start <= ki.line <= end for start, end in by_path.get(ki.path, ()))
+
+    return [ki for ki in key_issues if _matches(ki)]
+
+
+def _short_thread_description(body: str) -> str:
+    """Pull a one-line description out of a bot review-comment body for
+    use as 'already addressed' context. Strips badge/category lines and
+    looks for the first bold title; falls back to the first non-empty line.
+    """
+    body = body or ""
+    for line in body.splitlines():
+        s = line.strip()
+        # Skip badge/category lines (e.g. "🐛 **Bug**", "⚠️ Warning")
+        if not s or s.startswith(("⚠️", "🐛", "💡", "🔒", "⚡", "🛑", "🔵", "🟡", "🟠", "🔴")):
+            continue
+        # Pure-bold title line is the canonical short description
+        if s.startswith("**") and s.endswith("**") and len(s) > 4:
+            return s.strip("* ")[:160]
+        return s[:160]
+    return ""
+
+
 def _extract_sections(
     lines: list[str],
     threads: list[UnresolvedThread],
@@ -284,17 +334,72 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Failed to post in-progress walkthrough: %s", exc)
 
+        # Detect review round and surface resolved threads as context. Round
+        # 1 is the first time the bot reviews; round 2+ raises the comment
+        # threshold so we converge instead of dripping new findings on every
+        # push. Resolved-thread paths are passed to the prompt as "already
+        # addressed — don't re-flag this area".
+        review_round = 1
+        resolved_thread_dicts: list[dict] = []
+        try:
+            if self.bot_name and self.provider is not None:
+                all_bot_threads = await self.provider.get_all_bot_threads(
+                    pr_info,
+                    self.bot_name,
+                )
+                if all_bot_threads:
+                    review_round = 2
+                resolved_thread_dicts = [
+                    {
+                        "path": t.path,
+                        "line": t.line,
+                        "description": _short_thread_description(t.body),
+                    }
+                    for t in all_bot_threads
+                    if t.is_resolved
+                ]
+        except Exception as exc:
+            logger.warning("Failed to compute review round: %s", exc)
+
+        # Pull the team conventions text the indexer extracted from
+        # CONTRIBUTING.md / AGENTS.md / STYLE.md so the LLM knows
+        # repo-specific style rules.
+        team_conventions = ""
+        try:
+            from mira.dashboard.api import _app_db
+
+            repo_record = _app_db.get_repo(pr_info.owner, pr_info.repo)
+            if repo_record and repo_record.conventions:
+                team_conventions = repo_record.conventions
+        except Exception:
+            pass
+
         result = await self._review_diff_internal(
             diff_text,
             pr_title=pr_info.title,
             pr_description=pr_info.description,
             existing_comments=unresolved_threads or None,
             on_walkthrough_ready=_on_walkthrough_ready,
+            review_round=review_round,
+            resolved_threads=resolved_thread_dicts or None,
+            team_conventions=team_conventions,
         )
 
         # Final walkthrough update with real review stats. Tighten confidence
         # now that we know what the review found — the initial LLM score
         # predates the chunked review.
+        #
+        # Wait for the in-progress walkthrough update to finish before posting
+        # the final one. If we don't, the in-progress write can land after
+        # this final one (race lands reliably on PRs with zero comments where
+        # chunk review is faster than a GitHub API write), leaving the
+        # comment stuck on "Code review in progress…".
+        notify_task = getattr(self, "_walkthrough_notify_task", None)
+        if notify_task is not None:
+            # Already logged inside the task; just proceed to final post.
+            with contextlib.suppress(Exception):
+                await notify_task
+
         if result.walkthrough:
             _clamp_confidence_to_findings(result.walkthrough, result.comments)
             if self.dry_run:
@@ -455,6 +560,9 @@ class ReviewEngine:
         pr_description: str = "",
         existing_comments: list[UnresolvedThread] | None = None,
         on_walkthrough_ready: Callable[[WalkthroughResult | None], Awaitable[None]] | None = None,
+        review_round: int = 1,
+        resolved_threads: list[dict] | None = None,
+        team_conventions: str = "",
     ) -> ReviewResult:
         """Core review pipeline.
 
@@ -594,6 +702,13 @@ class ReviewEngine:
         # chunks depend on it.
         walkthrough_task = _asyncio.create_task(_generate_walkthrough())
 
+        # The notify task is referenced on `self` so the caller (review_pr)
+        # can await it before its own final update — without this, a slow
+        # in-progress update can land *after* the final update on PRs with
+        # zero review comments (chunk review finishes faster than the
+        # callback's GitHub API write), leaving the comment stuck on
+        # "Code review in progress…".
+        self._walkthrough_notify_task = None
         if on_walkthrough_ready is not None:
 
             async def _notify_caller() -> None:
@@ -603,7 +718,7 @@ class ReviewEngine:
                 except Exception as exc:
                     logger.warning("on_walkthrough_ready callback failed: %s", exc)
 
-            _asyncio.create_task(_notify_caller())
+            self._walkthrough_notify_task = _asyncio.create_task(_notify_caller())
 
         # ── Fetch decision-archaeology history in parallel with code context.
         # The provider may not exist (CLI / dry-run); in that case we just skip.
@@ -697,6 +812,9 @@ class ReviewEngine:
                         learned_rules=learned_rules or None,
                         custom_rules=custom_rules or None,
                         file_history=chunk_history or None,
+                        review_round=review_round,
+                        resolved_threads=resolved_threads,
+                        team_conventions=team_conventions,
                     )
                     raw_response = await self.llm.review(messages)
                     parsed = parse_llm_response(raw_response)
@@ -733,11 +851,44 @@ class ReviewEngine:
         # Classify severity
         all_comments = [classify_severity(c) for c in all_comments]
 
-        # Noise filter
-        final_comments = filter_noise(all_comments, self.config.filter)
+        # Noise filter — pass review_round so round 2+ raises the floor.
+        final_comments = filter_noise(
+            all_comments,
+            self.config.filter,
+            review_round=review_round,
+        )
+
+        # Self-critique pass — re-verify each draft comment before posting.
+        # Catches confident-but-wrong claims (the LLM's own analysis errors)
+        # that the noise filter can't catch because confidence scores are
+        # also LLM-generated. Uses the cheap indexing-tier model so the
+        # added cost is ~$0.001 per review.
+        if final_comments and self.config.review.self_critique:
+            try:
+                final_comments = await self._self_critique(final_comments)
+            except Exception as exc:
+                logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
+
+        all_key_issues = _drop_orphan_key_issues(all_key_issues, final_comments)
 
         if self.config.review.include_summary:
-            summary = " ".join(summaries) if summaries else "No issues found."
+            original_summary = " ".join(summaries) if summaries else ""
+            # Regenerate the summary from the FINAL filed outputs so the prose
+            # cannot mention issues that aren't backed by an inline comment or
+            # key_issue. The first-pass summary may reference findings the LLM
+            # noticed but didn't file — or that got dropped by noise filter /
+            # self-critique / orphan filter — and that mismatch confuses readers.
+            try:
+                summary = await self._regenerate_summary(
+                    final_comments,
+                    all_key_issues,
+                    pr_title,
+                    pr_description,
+                    fallback=original_summary,
+                )
+            except Exception as exc:
+                logger.warning("Summary regeneration failed, using original: %s", exc)
+                summary = original_summary or "No issues found."
         else:
             summary = ""
 
@@ -755,6 +906,162 @@ class ReviewEngine:
             skipped_paths=skipped_paths_only,
             total_paths=all_paths,
         )
+
+    async def _self_critique(self, comments: list[ReviewComment]) -> list[ReviewComment]:
+        """Run a second-pass critique on each draft comment.
+
+        The critic asks: *for each comment, can you cite specific lines that
+        prove this is a real, actionable issue?* Comments without verifiable
+        citations or with confidently-wrong analysis get dropped.
+
+        Uses the cheap indexing-tier model (Haiku-class) — the critic is a
+        verification step, not a generation step. Returns the kept comments
+        in their original order.
+        """
+        import json as _json
+
+        from mira.config import load_config
+        from mira.dashboard.models_config import llm_config_for
+        from mira.llm.provider import SUBMIT_CRITIQUE_TOOL, LLMProvider
+
+        if not comments:
+            return comments
+
+        # Build a compact draft block for the critic. We include the verbatim
+        # cited code so the critic can verify the claim against ground truth.
+        draft_lines = []
+        for i, c in enumerate(comments):
+            cited = (c.existing_code or "").strip()
+            if len(cited) > 400:
+                cited = cited[:400] + "…"
+            draft_lines.append(
+                f"[{i}] {c.path}:{c.line} — {c.severity.name} / {c.category}\n"
+                f"    Title: {c.title}\n"
+                f"    Body:  {(c.body or '').strip()[:500]}\n"
+                f"    Cites: {cited or '(no code citation)'}\n"
+            )
+        critic_prompt = (
+            "You are reviewing draft PR comments produced by another reviewer. "
+            "Your job is to filter out confidently-wrong analyses, speculation, "
+            "and 'while I'm here' nitpicks. Keep only comments where the cited "
+            "code clearly proves the issue and the fix is actionable.\n\n"
+            "Be especially skeptical of:\n"
+            "- Claims about Python/JS semantics that don't match the actual "
+            "  language behaviour (e.g. 'decorator only registers last route' "
+            "  is wrong; stacked decorators register both)\n"
+            "- Race-condition or timing arguments that depend on lines not in "
+            "  the citation\n"
+            "- 'May not be valid' / 'could potentially' hedges without proof\n"
+            "- Style preferences masquerading as warnings\n\n"
+            "If the cited code clearly proves the issue, KEEP it. If you're "
+            "unsure or it looks speculative, DROP it.\n\n"
+            "## Draft comments\n\n" + "\n".join(draft_lines)
+        )
+
+        # Use the indexing-tier (cheap) model — critique is a verification
+        # task, not generation. Falls back to the review model if no
+        # indexing model is configured.
+        try:
+            base_config = load_config()
+            critic_llm = LLMProvider(llm_config_for("indexing", base_config.llm))
+        except Exception:
+            critic_llm = self.llm
+
+        try:
+            raw = await critic_llm.complete_with_tools(
+                messages=[{"role": "user", "content": critic_prompt}],
+                tools=[SUBMIT_CRITIQUE_TOOL],
+                temperature=0.0,
+            )
+            data = _json.loads(raw) if raw else {}
+        except Exception as exc:
+            logger.warning("Self-critique LLM call failed: %s. Keeping all drafts.", exc)
+            return comments
+
+        verdicts = data.get("verdicts") or []
+        if not isinstance(verdicts, list):
+            return comments
+
+        keep_indices = {int(v["index"]) for v in verdicts if v.get("keep") is True}
+        # Log what got dropped so reviewers can audit calibration over time.
+        for v in verdicts:
+            if v.get("keep") is False and 0 <= int(v.get("index", -1)) < len(comments):
+                idx = int(v["index"])
+                logger.info(
+                    "Self-critique dropped [%d] %s:%d — %s",
+                    idx,
+                    comments[idx].path,
+                    comments[idx].line,
+                    str(v.get("reason", "no reason"))[:120],
+                )
+
+        return [c for i, c in enumerate(comments) if i in keep_indices]
+
+    async def _regenerate_summary(
+        self,
+        comments: list[ReviewComment],
+        key_issues: list[KeyIssue],
+        pr_title: str,
+        pr_description: str,
+        fallback: str,
+    ) -> str:
+        """Rewrite the review summary so it describes only what was actually filed.
+
+        The first-pass summary is generated alongside the comments and can
+        mention issues that never got filed (LLM put them in prose only) or
+        that were later dropped by noise filter / self-critique / orphan
+        filter. Regenerate from the surviving structured outputs using the
+        cheap indexing-tier model so the prose can't lie about what's in the
+        Key Issues table or the inline comments.
+        """
+        if not comments and not key_issues:
+            return "No issues found."
+
+        from mira.config import load_config
+        from mira.dashboard.models_config import llm_config_for
+        from mira.llm.provider import LLMProvider
+
+        # Compact representation of what got filed.
+        filed_lines = []
+        for c in comments:
+            filed_lines.append(f"- {c.path}:{c.line} [{c.severity.name} / {c.category}] {c.title}")
+        for ki in key_issues:
+            filed_lines.append(f"- KEY: {ki.path}:{ki.line} — {ki.issue[:200]}")
+
+        title_line = f"PR title: {pr_title}\n" if pr_title else ""
+        desc_line = f"PR description: {pr_description[:400]}\n" if pr_description else ""
+        prompt = (
+            "Write a 2-3 sentence summary of a PR review. The summary will "
+            "appear at the top of the review on GitHub. It must describe "
+            "ONLY the issues listed below — do NOT invent, speculate, or "
+            "mention concerns that aren't in this list. If the list is "
+            "empty, say the PR looks clean. Use plain prose, no markdown "
+            "headers or bullets. Reference file paths inline where it "
+            "helps.\n\n"
+            f"{title_line}{desc_line}\n"
+            "## Filed issues\n\n"
+            + "\n".join(filed_lines)
+            + "\n\nReturn just the summary text — no preamble, no quotes."
+        )
+
+        try:
+            base_config = load_config()
+            summary_llm = LLMProvider(llm_config_for("indexing", base_config.llm))
+        except Exception:
+            summary_llm = self.llm
+
+        try:
+            text = await summary_llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                json_mode=False,
+                temperature=0.0,
+            )
+        except Exception as exc:
+            logger.warning("Summary regen LLM call failed: %s", exc)
+            return fallback or "No issues found."
+
+        text = (text or "").strip()
+        return text or fallback or "No issues found."
 
     async def _resolve_verified_threads(
         self, pr_info: PRInfo

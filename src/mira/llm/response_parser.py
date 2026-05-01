@@ -183,6 +183,7 @@ def convert_to_review_comments(
                 confidence=c.confidence,
                 suggestion=suggestion,
                 agent_prompt=c.agent_prompt,
+                existing_code=c.existing_code,
             )
         )
 

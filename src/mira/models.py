@@ -134,6 +134,10 @@ class ReviewComment:
     confidence: float
     suggestion: str | None = None
     agent_prompt: str | None = None
+    # Verbatim code from the diff that the comment targets — used by the
+    # self-critique pass to ground the LLM's analysis against actual code,
+    # and stripped before posting (not surfaced in the rendered comment).
+    existing_code: str = ""
 
 
 def _format_stats_breakdown(stats: dict[Severity, int]) -> str:

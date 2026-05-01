@@ -210,3 +210,67 @@ class TestIsDuplicate:
         a = _make_comment(path="a.py", line=5, title="Shell injection risk")
         b = _make_comment(path="a.py", line=100, title="Hardcoded API key exposed")
         assert _is_duplicate(a, b) is False
+
+
+class TestRoundAwareFiltering:
+    """Round 1 sets the bar; round 2+ tightens to filter the long-tail drip."""
+
+    def test_round_1_uses_config_defaults(self):
+        comments = [
+            _make_comment(severity=Severity.SUGGESTION, confidence=0.75, line=1, title="A"),
+            _make_comment(severity=Severity.WARNING, confidence=0.9, line=2, title="B"),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.7), review_round=1)
+        # Round 1 keeps both — they pass the 0.7 floor and any-severity floor.
+        assert len(result) == 2
+
+    def test_round_2_tightens_confidence_floor(self):
+        # 0.75 passes round 1's 0.7 floor but is below round 2's implicit 0.8.
+        comments = [
+            _make_comment(severity=Severity.WARNING, confidence=0.75, line=1, title="A"),
+            _make_comment(severity=Severity.WARNING, confidence=0.85, line=2, title="B"),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.7), review_round=2)
+        assert len(result) == 1
+        assert result[0].confidence == 0.85
+
+    def test_round_2_drops_suggestions_keeps_warnings(self):
+        # Suggestion-tier comments are exactly the long-tail drip we want to
+        # stop on follow-up rounds. Real bugs land at warning+ and stay.
+        comments = [
+            _make_comment(severity=Severity.SUGGESTION, confidence=0.95, line=1, title="A"),
+            _make_comment(severity=Severity.WARNING, confidence=0.85, line=2, title="B"),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.7), review_round=2)
+        assert len(result) == 1
+        assert result[0].severity == Severity.WARNING
+
+    def test_round_3_tightens_further(self):
+        # Round 3 raises confidence floor to 0.85; 0.82 is dropped.
+        comments = [
+            _make_comment(severity=Severity.WARNING, confidence=0.82, line=1, title="A"),
+            _make_comment(severity=Severity.BLOCKER, confidence=0.9, line=2, title="B"),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.7), review_round=3)
+        assert len(result) == 1
+        assert result[0].severity == Severity.BLOCKER
+
+    def test_round_n_does_not_bump_below_user_floor(self):
+        # If the user already configured a stricter floor, round 2's bump to
+        # 0.8 must not LOWER it.
+        comments = [
+            _make_comment(severity=Severity.WARNING, confidence=0.85, line=1, title="A"),
+            _make_comment(severity=Severity.WARNING, confidence=0.95, line=2, title="B"),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.9), review_round=2)
+        assert len(result) == 1
+        assert result[0].confidence == 0.95
+
+    def test_blocker_passes_round_2_filter(self):
+        # A real bug introduced by a fix must still be flagged in round 2.
+        comments = [
+            _make_comment(severity=Severity.BLOCKER, confidence=0.85, line=1),
+        ]
+        result = filter_noise(comments, FilterConfig(confidence_threshold=0.7), review_round=2)
+        assert len(result) == 1
+        assert result[0].severity == Severity.BLOCKER

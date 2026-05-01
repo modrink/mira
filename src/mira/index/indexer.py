@@ -652,6 +652,15 @@ async def index_repo(
     except Exception as exc:
         logger.warning("Manifest indexing failed for %s/%s: %s", owner, repo, exc)
 
+    # ── Conventions pass (no LLM calls — pure file reads) ──
+    # Pull CONTRIBUTING.md / AGENTS.md / STYLE.md from the tarball cache and
+    # extract team-specific coding rules. Stored on the repos row so the
+    # review prompt can inject them.
+    try:
+        await _index_conventions(owner, repo, token, branch, tree_paths, fetch_sem, tarball)
+    except Exception as exc:
+        logger.warning("Conventions indexing failed for %s/%s: %s", owner, repo, exc)
+
     # ── Vulnerability scan (fire-and-forget) ──
     # Triggers an OSV.dev poll for this repo's packages so freshly-indexed
     # manifests get a vuln check without waiting for the next hourly tick.
@@ -668,6 +677,57 @@ async def index_repo(
 
     logger.info("Indexing complete: %d files indexed for %s/%s", indexed_count, owner, repo)
     return indexed_count
+
+
+async def _index_conventions(
+    owner: str,
+    repo: str,
+    token: str,
+    branch: str,
+    tree_paths: list[str],
+    fetch_sem: asyncio.Semaphore,
+    cached_contents: dict[str, str] | None = None,
+) -> None:
+    """Read team-conventions files from the repo and persist the extracted
+    rules so they can be injected into review prompts.
+    """
+    from mira.index.conventions import _CONVENTION_FILES, extract_conventions
+
+    # Files we'll attempt — only ones the tree actually contains.
+    tree_set = set(tree_paths)
+    candidates = [p for p in _CONVENTION_FILES if p in tree_set]
+
+    if not candidates:
+        return
+
+    if cached_contents is not None:
+        file_contents = {p: cached_contents.get(p) or "" for p in candidates}
+    else:
+        results = await asyncio.gather(
+            *(
+                _fetch_file_content(owner, repo, p, token, ref=branch, semaphore=fetch_sem)
+                for p in candidates
+            )
+        )
+        file_contents = {p: (c or "") for p, c in zip(candidates, results, strict=False)}
+
+    extracted = extract_conventions(file_contents)
+    if not extracted:
+        return
+
+    try:
+        from mira.dashboard.api import _app_db
+
+        _app_db.set_repo_conventions(owner, repo, extracted)
+        logger.info(
+            "Extracted %d-char conventions block for %s/%s from %s",
+            len(extracted),
+            owner,
+            repo,
+            ", ".join(p for p, c in file_contents.items() if c),
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist conventions for %s/%s: %s", owner, repo, exc)
 
 
 async def _index_manifests(

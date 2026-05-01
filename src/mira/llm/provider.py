@@ -122,6 +122,88 @@ SUBMIT_REVIEW_TOOL = {
     },
 }
 
+SUBMIT_CRITIQUE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_critique",
+        "description": (
+            "For each draft review comment, decide whether it's a real, "
+            "verifiable issue. Return the indices of comments worth keeping "
+            "and a brief reason for each rejection."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "verdicts": {
+                    "type": "array",
+                    "description": "One verdict per draft comment, in input order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": {
+                                "type": "integer",
+                                "description": "Zero-based index of the draft comment.",
+                            },
+                            "keep": {
+                                "type": "boolean",
+                                "description": (
+                                    "true if the comment cites specific code that proves "
+                                    "the issue, the reasoning is correct, and the fix is "
+                                    "actionable. false for confident-but-wrong claims, "
+                                    "speculation, or 'while I'm here' style nits."
+                                ),
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "One short sentence explaining the verdict.",
+                            },
+                        },
+                        "required": ["index", "keep", "reason"],
+                    },
+                },
+            },
+            "required": ["verdicts"],
+        },
+    },
+}
+
+
+SUBMIT_THREAD_REPLY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_thread_reply",
+        "description": (
+            "Reply to a human's comment on one of your previous PR review "
+            "suggestions. Classify their intent and write a short reply."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": ["disagreement", "question", "agreement", "other"],
+                    "description": (
+                        "disagreement = human refutes the suggestion / says it doesn't apply. "
+                        "question = human is asking for clarification. "
+                        "agreement = human is acknowledging or thanking. "
+                        "other = anything else (off-topic, unclear)."
+                    ),
+                },
+                "reply": {
+                    "type": "string",
+                    "description": (
+                        "Your reply, 1-2 short sentences, plain text, no markdown. "
+                        'No emojis, no apologies, no "as an AI". For disagreement, '
+                        "concede gracefully. For questions, answer directly."
+                    ),
+                },
+            },
+            "required": ["intent", "reply"],
+        },
+    },
+}
+
+
 SUBMIT_WALKTHROUGH_TOOL = {
     "type": "function",
     "function": {

@@ -8,9 +8,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mira.config import MiraConfig
-from mira.core.engine import ReviewEngine, _clamp_confidence_to_findings, _extract_sections
+from mira.core.engine import (
+    ReviewEngine,
+    _clamp_confidence_to_findings,
+    _drop_orphan_key_issues,
+    _extract_sections,
+)
 from mira.llm.provider import LLMProvider
 from mira.models import (
+    KeyIssue,
     PRInfo,
     ReviewComment,
     Severity,
@@ -937,3 +943,386 @@ class TestThreadResolution:
         # Review should still complete
         assert result is not None
         mock_provider.get_pr_diff.assert_awaited_once()
+
+
+class TestShortThreadDescription:
+    """Helper that extracts a one-line summary from a bot review-comment body
+    for use as 'already addressed' context in follow-up rounds."""
+
+    def test_extracts_bold_title(self):
+        from mira.core.engine import _short_thread_description
+
+        body = "🐛 **Bug**\n⚠️ Warning\n\n**Resource leak in handler**\n\nLong body text."
+        assert _short_thread_description(body) == "Resource leak in handler"
+
+    def test_skips_badge_lines(self):
+        from mira.core.engine import _short_thread_description
+
+        body = "⚠️ **Error Handling**\n💡 Suggestion\n\n**Catches every exception too broadly**"
+        assert "Catches every exception" in _short_thread_description(body)
+
+    def test_falls_back_to_first_line(self):
+        from mira.core.engine import _short_thread_description
+
+        body = "Plain text comment without a bold title.\nMore detail follows."
+        assert _short_thread_description(body) == "Plain text comment without a bold title."
+
+    def test_truncates_long_descriptions(self):
+        from mira.core.engine import _short_thread_description
+
+        body = "**" + ("very long title " * 20) + "**"
+        assert len(_short_thread_description(body)) <= 160
+
+    def test_empty_returns_empty(self):
+        from mira.core.engine import _short_thread_description
+
+        assert _short_thread_description("") == ""
+        assert _short_thread_description("   \n  \n") == ""
+
+
+class TestRoundDetectionWiring:
+    """review_pr should detect round number from existing bot threads and
+    pass it through, plus collect resolved threads as context."""
+
+    @pytest.mark.asyncio
+    async def test_review_pr_detects_round_2_when_threads_exist(self, monkeypatch):
+        """If the bot has already left threads on the PR, review_round=2."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mira.core.engine import ReviewEngine
+        from mira.models import BotThreadRecord, PRInfo
+
+        mock_provider = MagicMock()
+        mock_provider.get_pr_info = AsyncMock(
+            return_value=PRInfo(
+                title="t",
+                description="",
+                base_branch="main",
+                head_branch="f",
+                url="https://github.com/o/r/pull/1",
+                number=1,
+                owner="o",
+                repo="r",
+            )
+        )
+        mock_provider.get_pr_diff = AsyncMock(return_value="")
+        mock_provider.get_unresolved_bot_threads = AsyncMock(return_value=[])
+        mock_provider.get_all_bot_threads = AsyncMock(
+            return_value=[
+                BotThreadRecord(
+                    thread_id="t1",
+                    path="a.py",
+                    line=10,
+                    body="**Already-fixed concern**",
+                    is_resolved=True,
+                ),
+            ]
+        )
+        mock_provider.find_bot_comment = AsyncMock(return_value=None)
+        mock_provider.post_comment = AsyncMock()
+        mock_provider.update_comment = AsyncMock()
+        mock_provider.resolve_outdated_review_threads = AsyncMock(return_value=0)
+
+        captured: dict = {}
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["review_round"] = kwargs.get("review_round")
+            captured["resolved_threads"] = kwargs.get("resolved_threads")
+            from mira.models import ReviewResult
+
+            return ReviewResult(comments=[], summary="")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert captured["review_round"] == 2
+        assert captured["resolved_threads"] is not None
+        assert len(captured["resolved_threads"]) == 1
+        assert captured["resolved_threads"][0]["path"] == "a.py"
+        assert captured["resolved_threads"][0]["line"] == 10
+        assert "Already-fixed concern" in captured["resolved_threads"][0]["description"]
+
+    @pytest.mark.asyncio
+    async def test_review_pr_round_1_when_no_prior_threads(self, monkeypatch):
+        """First review on a PR — no bot threads yet, round=1."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mira.core.engine import ReviewEngine
+        from mira.models import PRInfo
+
+        mock_provider = MagicMock()
+        mock_provider.get_pr_info = AsyncMock(
+            return_value=PRInfo(
+                title="t",
+                description="",
+                base_branch="main",
+                head_branch="f",
+                url="https://github.com/o/r/pull/1",
+                number=1,
+                owner="o",
+                repo="r",
+            )
+        )
+        mock_provider.get_pr_diff = AsyncMock(return_value="")
+        mock_provider.get_unresolved_bot_threads = AsyncMock(return_value=[])
+        mock_provider.get_all_bot_threads = AsyncMock(return_value=[])
+        mock_provider.find_bot_comment = AsyncMock(return_value=None)
+        mock_provider.post_comment = AsyncMock()
+        mock_provider.update_comment = AsyncMock()
+        mock_provider.resolve_outdated_review_threads = AsyncMock(return_value=0)
+
+        captured: dict = {}
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["review_round"] = kwargs.get("review_round")
+            from mira.models import ReviewResult
+
+            return ReviewResult(comments=[], summary="")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert captured["review_round"] == 1
+
+
+class TestSelfCritique:
+    """Second-pass critique drops confidently-wrong findings before posting."""
+
+    def _make_comment(self, **kw):
+        defaults = {
+            "path": "src/x.py",
+            "line": 10,
+            "end_line": None,
+            "severity": Severity.WARNING,
+            "category": "bug",
+            "title": "Test issue",
+            "body": "Body text",
+            "confidence": 0.85,
+            "existing_code": "def foo(): pass",
+        }
+        defaults.update(kw)
+        return ReviewComment(**defaults)
+
+    @pytest.mark.asyncio
+    async def test_critique_drops_unkept_comments(self, monkeypatch):
+        """LLM returns keep=false for one of two; that one gets dropped."""
+        from unittest.mock import AsyncMock
+
+        from mira.core.engine import ReviewEngine
+
+        comments = [
+            self._make_comment(line=10, title="Real bug"),
+            self._make_comment(line=20, title="False positive"),
+        ]
+
+        # Mock the critic to drop comment index 1 (the false positive).
+        verdict_response = json.dumps(
+            {
+                "verdicts": [
+                    {"index": 0, "keep": True, "reason": "valid"},
+                    {"index": 1, "keep": False, "reason": "speculation"},
+                ]
+            }
+        )
+
+        # Patch LLMProvider so the critic LLM returns our canned response.
+        # The engine instantiates the critic via load_config(); easier to
+        # patch complete_with_tools globally.
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete_with_tools(self, messages, tools, temperature=None):
+            return verdict_response
+
+        monkeypatch.setattr(
+            provider_mod.LLMProvider, "complete_with_tools", fake_complete_with_tools
+        )
+
+        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        kept = await engine._self_critique(comments)
+
+        assert len(kept) == 1
+        assert kept[0].title == "Real bug"
+
+    @pytest.mark.asyncio
+    async def test_critique_keeps_all_when_llm_fails(self, monkeypatch):
+        """LLM call failure must NOT silently drop comments — keep them all."""
+        from unittest.mock import AsyncMock
+
+        from mira.core.engine import ReviewEngine
+
+        comments = [self._make_comment(line=10), self._make_comment(line=20, title="Two")]
+
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete_with_tools(self, messages, tools, temperature=None):
+            raise RuntimeError("LLM down")
+
+        monkeypatch.setattr(
+            provider_mod.LLMProvider, "complete_with_tools", fake_complete_with_tools
+        )
+
+        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        kept = await engine._self_critique(comments)
+
+        # All originals retained on critic failure (fail-open, not fail-closed).
+        assert len(kept) == 2
+
+    @pytest.mark.asyncio
+    async def test_critique_empty_input_returns_empty(self):
+        """Critic should not call the LLM if there are no comments to verify."""
+        from unittest.mock import AsyncMock
+
+        from mira.core.engine import ReviewEngine
+
+        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        kept = await engine._self_critique([])
+        assert kept == []
+
+
+class TestRegenerateSummary:
+    """Summary prose must describe only issues that were actually filed."""
+
+    def _comment(self, **kw):
+        defaults = {
+            "path": "src/x.py",
+            "line": 10,
+            "end_line": None,
+            "severity": Severity.WARNING,
+            "category": "bug",
+            "title": "t",
+            "body": "b",
+            "confidence": 0.9,
+        }
+        defaults.update(kw)
+        return ReviewComment(**defaults)
+
+    @pytest.mark.asyncio
+    async def test_returns_no_issues_when_nothing_filed(self):
+        """Empty inputs short-circuit before any LLM call."""
+        from mira.core.engine import ReviewEngine
+
+        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        out = await engine._regenerate_summary([], [], "title", "desc", fallback="x")
+        assert out == "No issues found."
+
+    @pytest.mark.asyncio
+    async def test_uses_cheap_llm_output(self, monkeypatch):
+        """Successful regen returns the cheap LLM's prose, stripped."""
+        from mira.core.engine import ReviewEngine
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
+            return "  Fresh summary based on filed issues only.  "
+
+        monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        out = await engine._regenerate_summary(
+            [self._comment()], [], "title", "desc", fallback="old summary"
+        )
+        assert out == "Fresh summary based on filed issues only."
+
+    @pytest.mark.asyncio
+    async def test_falls_back_on_llm_failure(self, monkeypatch):
+        """LLM error must not crash the review — use the original summary."""
+        from mira.core.engine import ReviewEngine
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
+            raise RuntimeError("LLM down")
+
+        monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        out = await engine._regenerate_summary(
+            [self._comment()], [], "t", "d", fallback="original prose"
+        )
+        assert out == "original prose"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_llm_returns_empty(self, monkeypatch):
+        """Empty LLM output → use fallback so summary is never blank."""
+        from mira.core.engine import ReviewEngine
+        from mira.llm import provider as provider_mod
+
+        async def fake_complete(self, messages, json_mode=True, temperature=None, max_tokens=None):
+            return "   "
+
+        monkeypatch.setattr(provider_mod.LLMProvider, "complete", fake_complete)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=AsyncMock(), provider=None)
+        out = await engine._regenerate_summary([self._comment()], [], "t", "d", fallback="fallback")
+        assert out == "fallback"
+
+
+class TestDropOrphanKeyIssues:
+    """Key Issues table must stay in sync with surviving inline comments."""
+
+    def _comment(self, path="src/x.py", line=10, end_line=None):
+        return ReviewComment(
+            path=path,
+            line=line,
+            end_line=end_line,
+            severity=Severity.WARNING,
+            category="bug",
+            title="t",
+            body="b",
+            confidence=0.9,
+        )
+
+    def test_drops_orphan_when_inline_filtered_out(self):
+        # Inline comment for line 1037 was dropped; its key_issue must go too.
+        comments = [self._comment(line=700)]
+        key_issues = [
+            KeyIssue(issue="kept", path="src/x.py", line=700),
+            KeyIssue(issue="orphan", path="src/x.py", line=1037),
+        ]
+        kept = _drop_orphan_key_issues(key_issues, comments)
+        assert [k.line for k in kept] == [700]
+
+    def test_keeps_when_line_within_comment_range(self):
+        # Multi-line comment covers lines 50-55; key_issue at 53 is kept.
+        comments = [self._comment(line=50, end_line=55)]
+        key_issues = [KeyIssue(issue="mid-range", path="src/x.py", line=53)]
+        assert _drop_orphan_key_issues(key_issues, comments) == key_issues
+
+    def test_keeps_within_line_tolerance(self):
+        # LLM filed inline at 296 but key_issue at 290 — same finding, off
+        # by a few lines. Should still be kept.
+        comments = [self._comment(line=296)]
+        key_issues = [KeyIssue(issue="off by 6", path="src/x.py", line=290)]
+        assert _drop_orphan_key_issues(key_issues, comments) == []
+        # Within ±3 should match.
+        assert _drop_orphan_key_issues(
+            [KeyIssue(issue="off by 3", path="src/x.py", line=293)],
+            comments,
+        ) == [KeyIssue(issue="off by 3", path="src/x.py", line=293)]
+
+    def test_path_mismatch_drops_key_issue(self):
+        # Same line, different path — must not match.
+        comments = [self._comment(path="src/a.py", line=10)]
+        key_issues = [KeyIssue(issue="other file", path="src/b.py", line=10)]
+        assert _drop_orphan_key_issues(key_issues, comments) == []
+
+    def test_empty_comments_drops_all(self):
+        # If self-critique drops every comment, no key_issues should survive.
+        key_issues = [KeyIssue(issue="x", path="src/x.py", line=1)]
+        assert _drop_orphan_key_issues(key_issues, []) == []
+
+    def test_empty_key_issues_returns_empty(self):
+        comments = [self._comment(line=10)]
+        assert _drop_orphan_key_issues([], comments) == []

@@ -82,6 +82,13 @@ class ReviewConfig(BaseModel):
     code_context: bool = True
     context_token_budget: int = 8_000
     max_concurrent_chunks: int = Field(default=5, ge=1, le=20)
+    # Run a second-pass LLM critique on each draft comment before posting.
+    # The critic asks "is this analysis actually correct? Cite specific
+    # lines that prove it." Comments that fail the critique are dropped.
+    # Catches confident-but-wrong findings; uses the cheap indexing-tier
+    # model (~$0.001 per review). Disable for faster reviews on small PRs
+    # where the extra ~5-10s wall time matters.
+    self_critique: bool = True
 
 
 class ProviderConfig(BaseModel):

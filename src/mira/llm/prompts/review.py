@@ -33,6 +33,9 @@ def build_review_prompt(
     learned_rules: list[str] | None = None,
     custom_rules: list[dict[str, str]] | None = None,
     file_history: dict | None = None,
+    review_round: int = 1,
+    resolved_threads: list[dict] | None = None,
+    team_conventions: str = "",
 ) -> list[dict[str, str]]:
     """Build the review prompt messages for the LLM.
 
@@ -85,6 +88,9 @@ def build_review_prompt(
         learned_rules=learned_rules,
         custom_rules=custom_rules,
         file_history=history_for_template,
+        review_round=review_round,
+        resolved_threads=resolved_threads,
+        team_conventions=team_conventions,
     )
 
     # Build user message with optional code context before diffs
