@@ -1,4 +1,5 @@
 import { BookOpen, Brain, Database, GitFork, LayoutDashboard, LogOut, Moon, Package, Settings, ShieldAlert, Sun, Users } from "lucide-react"
+import { useEffect, useState } from "react"
 import { NavLink, Outlet, useLocation } from "react-router"
 
 import { useTheme } from "@/components/theme-provider"
@@ -101,6 +102,19 @@ export function DashboardLayout() {
     (item) => !("adminOnly" in item && item.adminOnly) || user?.is_admin,
   )
 
+  // Fetch the running Mira version once on mount and render it next to the
+  // logo. Falls back silently if the call fails (e.g. older backend without
+  // the endpoint) — the chrome stays clean instead of showing "unknown".
+  const [version, setVersion] = useState<string | null>(null)
+  useEffect(() => {
+    fetch("/api/version")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.version) setVersion(data.version)
+      })
+      .catch(() => {})
+  }, [])
+
   return (
     <SidebarProvider>
       <Sidebar collapsible="icon">
@@ -112,7 +126,14 @@ export function DashboardLayout() {
                   <div className="flex aspect-square size-8 items-center justify-center">
                     <img src="/logo.png" alt="Mira" className="size-7" />
                   </div>
-                  <span className="text-sm font-semibold">Mira</span>
+                  <div className="flex flex-col leading-tight">
+                    <span className="text-sm font-semibold">Mira</span>
+                    {version && (
+                      <span className="text-[10px] text-muted-foreground tabular-nums">
+                        v{version}
+                      </span>
+                    )}
+                  </div>
                 </a>
               </SidebarMenuButton>
             </SidebarMenuItem>

@@ -327,10 +327,19 @@ class ReviewEngine:
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
-        # Set during _build_context: True when the repo has no prior index,
-        # so cross-file context came from JIT lookup (less complete than
-        # a full pre-built index). Drives the walkthrough nudge that tells
-        # the user reviews will be more accurate after indexing.
+        # Set during _build_context.
+        #
+        # `_jit_needed` is True when the index store has no summaries for
+        # the *changed files in this PR* — controls JIT cross-file lookup
+        # and the agentic tool-use path. This fires regularly even on a
+        # well-indexed repo (e.g. a PR touching only README.md, which the
+        # indexer skips), so it must NOT be used to tell the user "your
+        # repo isn't indexed."
+        #
+        # `_index_was_empty` is True only when the index store has NO data
+        # at all for this repo — that's the actual "this repo hasn't been
+        # indexed" signal that drives the walkthrough nudge.
+        self._jit_needed = False
         self._index_was_empty = False
         # Captured during _build_context for the agentic tool-use path: a
         # source fetcher and the repo tree at PR head. Both already needed
@@ -820,14 +829,25 @@ class ReviewEngine:
                     if doc_context:
                         ctx = ctx + "\n\n" + doc_context
 
-                    # Detect "empty index" — no summaries for any changed file
-                    # means the indexer hasn't run for this repo. Fall back to
-                    # JIT cross-file lookup: parse imports in the changed
-                    # files, fetch the imported files from HEAD, extract their
-                    # symbols, and inline. Works without a pre-built index.
-                    index_has_data = bool(store.get_summaries(changed_paths))
-                    self._index_was_empty = not index_has_data
-                    if not index_has_data and source_fetcher is not None:
+                    # Two distinct conditions, easily confused:
+                    #
+                    #   `index_has_data_for_changed` — at least one of the PR's
+                    #     changed files has a summary in the store. Drives JIT
+                    #     fallback for cross-file context: when this is False,
+                    #     parse imports + fetch HEAD content live.
+                    #
+                    #   `index_is_truly_empty` — the store has zero summaries
+                    #     for *any* file in the repo. Drives the user-visible
+                    #     "your repo isn't indexed" walkthrough nudge.
+                    #
+                    # The first can be False on a well-indexed repo (PR touches
+                    # only README.md, which the indexer skips) — that case must
+                    # not trigger the nudge, otherwise we tell users their
+                    # indexed repo isn't indexed.
+                    index_has_data_for_changed = bool(store.get_summaries(changed_paths))
+                    self._jit_needed = not index_has_data_for_changed
+                    self._index_was_empty = not bool(store.all_paths())
+                    if not index_has_data_for_changed and source_fetcher is not None:
                         try:
                             from mira.index.jit_context import (
                                 build_jit_cross_file_context,
@@ -1018,13 +1038,18 @@ class ReviewEngine:
                         team_conventions=team_conventions,
                     )
                     raw_response = ""
-                    # Agentic tool-use path: only on unindexed repos, where
-                    # the static context block is necessarily thin. Indexed
-                    # reviews already have the full picture, so the extra
-                    # hops would just slow things down.
+                    # Agentic tool-use path: only when the static context for
+                    # this PR's changed files is necessarily thin (no summaries
+                    # in the index for those paths). When the repo has summaries
+                    # for the changed files the static block already has the
+                    # full picture, so the extra tool-call hops would just slow
+                    # things down. We use `_jit_needed` (per-PR signal) rather
+                    # than `_index_was_empty` (whole-repo signal) so a PR that
+                    # touches files the indexer skipped still gets the agentic
+                    # fallback even on an indexed repo.
                     use_agentic = (
                         self.config.review.agentic_tools
-                        and getattr(self, "_index_was_empty", False)
+                        and getattr(self, "_jit_needed", False)
                         and self._agentic_source_fetcher is not None
                     )
                     if use_agentic:

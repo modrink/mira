@@ -263,6 +263,15 @@ class IndexStatusModel(BaseModel):
     error: str
 
 
+@router.get("/api/version")
+def get_version() -> dict[str, str]:
+    """Return the running Mira version. The dashboard renders this next to
+    the logo so self-hosters can see at a glance which release they're on."""
+    from mira import __version__
+
+    return {"version": __version__}
+
+
 @router.get("/api/indexing/status", response_model=list[IndexStatusModel])
 def get_indexing_status() -> list[IndexStatusModel]:
     """Get current indexing status for all repos."""
