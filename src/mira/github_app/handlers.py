@@ -32,6 +32,29 @@ def _open_store(owner: str, repo: str) -> IndexStore:
 _REVIEW_KEYWORDS = {"review", "review this", "review this pr"}
 _REJECT_KEYWORDS = {"reject", "dismiss", "resolve", "ignore"}
 _REVIEW_REST_KEYWORDS = {"review-rest", "review rest", "rest", "continue"}
+_HELP_KEYWORDS = {"help", "?", "commands"}
+
+
+def _help_message(bot_name: str) -> str:
+    """Markdown help comment listing every command Mira understands."""
+    return (
+        f"### Mira commands\n\n"
+        f"Mention `@{bot_name}` in a PR comment followed by one of these verbs:\n\n"
+        f"| Command | What it does |\n"
+        f"|---|---|\n"
+        f"| `@{bot_name} review` | Re-run the full review on this PR. Useful after force-pushes or when you want a fresh pass. |\n"
+        f"| `@{bot_name} review-rest` | Review files that were skipped on the first pass because the PR was too large. Aliases: `rest`, `continue`. |\n"
+        f"| `@{bot_name} pause` | Pause Mira on this PR. No more reviews until you resume. Adds a `mira-paused` label. |\n"
+        f"| `@{bot_name} resume` | Resume Mira on a paused PR and re-review the latest diff. |\n"
+        f"| `@{bot_name} help` | Show this message. Aliases: `?`, `commands`. |\n"
+        f"| `@{bot_name} <anything else>` | Ask a free-form question about the PR. Mira will reply inline using the PR diff as context. |\n\n"
+        f"On an inline review comment Mira posted, reply with `@{bot_name} reject` "
+        f"(aliases: `dismiss`, `resolve`, `ignore`) to mark the thread resolved and "
+        f"teach Mira not to make similar suggestions in the future.\n\n"
+        f"To skip a PR entirely, include `@{bot_name} ignore` in the PR body.\n\n"
+        f"Full docs: https://docs.miracode.ai/commands"
+    )
+
 
 _THREAD_REPLY_ENV = Environment(
     loader=FileSystemLoader(
@@ -138,6 +161,13 @@ async def handle_comment(
         normalized = question.lower().strip()
         is_review = normalized in _REVIEW_KEYWORDS
         is_review_rest = normalized in _REVIEW_REST_KEYWORDS
+        is_help = normalized in _HELP_KEYWORDS
+
+        if is_help:
+            pr_info_for_help = await provider.get_pr_info(pr_url)
+            await provider.post_comment(pr_info_for_help, _help_message(bot_name))
+            logger.info("Help requested on PR %s by @%s", pr_url, comment_user)
+            return
 
         if is_review_rest:
             # Pull the unreviewed paths from progress and run review scoped to them.

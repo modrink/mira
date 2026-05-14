@@ -29,6 +29,12 @@ class LLMConfig(BaseModel):
     temperature: float = 0.2
     max_tokens: int = 4096
     max_context_tokens: int = 120_000
+    # Endpoint configuration. Defaults to OpenRouter but any OpenAI-compatible
+    # chat-completions endpoint works — vLLM, Ollama, LiteLLM proxy, LocalAI,
+    # llama.cpp server, Together, Fireworks, Groq, etc. Set api_key_env to ""
+    # for local endpoints that don't require auth.
+    base_url: str = "https://openrouter.ai/api/v1"
+    api_key_env: str = "OPENROUTER_API_KEY"
 
 
 class FilterConfig(BaseModel):

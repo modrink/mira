@@ -586,6 +586,13 @@ class TestEndToEndReview:
                 "existing_code": "expected = hmac.new(",
             }
         ]
+        # Disable the optional passes whose LLM call sites this test does
+        # not mock — they'd otherwise short-circuit before `llm.review` is
+        # called (agentic_tools), or fail awaiting a MagicMock coroutine
+        # (security_pass, self_critique).
+        config.review.security_pass = False
+        config.review.self_critique = False
+        config.review.agentic_tools = False
         mock_llm = MagicMock(spec=LLMProvider)
         mock_llm.review = AsyncMock(return_value=self._make_review_response(comments))
         mock_llm.count_tokens = MagicMock(return_value=100)

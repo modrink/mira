@@ -4,6 +4,15 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-14
+
+### Added
+
+- **Custom LLM endpoints** — `llm.base_url` and `llm.api_key_env` in `.mira.yaml` let you point Mira at any OpenAI-compatible chat-completions API. Out-of-the-box examples for **vLLM**, **Ollama**, **LiteLLM proxy**, **LocalAI**, **llama.cpp server**, **Together**, **Fireworks**, **Groq**, and **Cerebras**. Defaults still target OpenRouter — existing configs keep working unchanged. Set `api_key_env: ""` for local endpoints that need no auth. OpenRouter-specific ranking headers (`HTTP-Referer`, `X-Title`) are only sent when targeting OpenRouter.
+- **`@miracodeai help` command** — posts an inline command list on the PR. Aliases: `?`, `commands`. New [Commands docs page](https://docs.miracode.ai/commands) documents every verb (`review`, `review-rest`, `pause`, `resume`, `help`, free-form Q&A on PRs; `reject`/`dismiss`/`resolve`/`ignore` on review threads; `ignore` in PR body).
+- **Benchmark section in README** — Mira's speed/quality position on the [public Code Review Bench](https://codereview.withmartian.com/?mode=offline), with a Pareto-frontier scatter plot and per-language F1 bars. Chart generator at `scripts/render_benchmark_charts.py` (one-off `uv run --with matplotlib`; no new runtime dependency).
+- **`docs.miracode.ai` badge** in the README, next to the Discord badge.
+
 ## [0.1.1] — 2026-05-11
 
 ### Added
@@ -83,4 +92,6 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.2.0]: https://github.com/miracodeai/mira/releases/tag/v0.2.0
+[0.1.1]: https://github.com/miracodeai/mira/releases/tag/v0.1.1
 [0.1.0]: https://github.com/miracodeai/mira/releases/tag/v0.1.0

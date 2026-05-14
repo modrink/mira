@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+
+def _is_openrouter(base_url: str) -> bool:
+    """OpenRouter-specific behavior (model prefix stripping, ranking headers)
+    is gated on the configured base_url. Any other URL (vLLM, Ollama,
+    LiteLLM proxy, LocalAI, Together, Fireworks, Groq, etc.) gets the
+    portable OpenAI-compatible request shape."""
+    return base_url.rstrip("/") == _OPENROUTER_BASE_URL.rstrip("/")
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas for structured output via function/tool calling
 # ---------------------------------------------------------------------------
@@ -267,19 +276,36 @@ SUBMIT_WALKTHROUGH_TOOL = {
 }
 
 
-def _get_api_key() -> str:
-    """Resolve the OpenRouter API key from environment."""
-    key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+def _get_api_key(config: LLMConfig) -> str:
+    """Resolve the API key for the configured endpoint.
+
+    Reads from `config.api_key_env` first, then falls back to the legacy
+    `OPENROUTER_API_KEY` / `OPENAI_API_KEY` lookup for backward compatibility.
+    If `api_key_env` is explicitly set to "" the empty string is returned
+    without error — useful for local endpoints (Ollama, llama.cpp server)
+    that don't require auth.
+    """
+    if config.api_key_env == "":
+        # Explicit opt-out — local endpoint with no auth.
+        return ""
+    key = os.environ.get(config.api_key_env, "")
+    if not key:
+        # Back-compat fallback so existing OPENROUTER_API_KEY / OPENAI_API_KEY
+        # setups keep working without changes.
+        key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
     if not key:
         raise LLMError(
-            "No API key found. Set OPENROUTER_API_KEY or OPENAI_API_KEY environment variable."
+            f"No API key found. Set {config.api_key_env} (or OPENROUTER_API_KEY / "
+            f'OPENAI_API_KEY) in the environment, or set llm.api_key_env: "" in '
+            f"your config for a local endpoint that needs no auth."
         )
     return key
 
 
-def _strip_model_prefix(model: str) -> str:
-    """Strip 'openrouter/' prefix if present — OpenRouter API wants bare model IDs."""
-    if model.startswith("openrouter/"):
+def _strip_model_prefix(model: str, base_url: str) -> str:
+    """Strip 'openrouter/' prefix only when targeting OpenRouter; other
+    endpoints accept (and often require) the full model string."""
+    if _is_openrouter(base_url) and model.startswith("openrouter/"):
         return model[len("openrouter/") :]
     return model
 
@@ -291,6 +317,23 @@ class LLMProvider:
         self.config = config
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+
+    def _chat_url(self) -> str:
+        return f"{self.config.base_url.rstrip('/')}/chat/completions"
+
+    def _build_headers(self) -> dict[str, str]:
+        """Build request headers. OpenRouter-specific ranking headers are
+        only attached when targeting OpenRouter; other endpoints get a clean
+        portable header set. Authorization is omitted entirely if the
+        endpoint needs no key (Ollama, llama.cpp, etc.)."""
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        key = _get_api_key(self.config)
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        if _is_openrouter(self.config.base_url):
+            headers["HTTP-Referer"] = "https://github.com/miracodeai/mira"
+            headers["X-Title"] = "Mira Code Reviewer"
+        return headers
 
     @retry(
         stop=stop_after_attempt(3),
@@ -306,9 +349,9 @@ class LLMProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        """Make a single LLM call with retries via OpenRouter."""
+        """Make a single LLM call with retries against the configured endpoint."""
         body: dict = {
-            "model": _strip_model_prefix(model),
+            "model": _strip_model_prefix(model, self.config.base_url),
             "messages": messages,
             "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": max_tokens if max_tokens is not None else self.config.max_tokens,
@@ -316,21 +359,14 @@ class LLMProvider:
         if json_mode:
             body["response_format"] = {"type": "json_object"}
 
-        headers = {
-            "Authorization": f"Bearer {_get_api_key()}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/miracodeai/mira",
-            "X-Title": "Mira Code Reviewer",
-        }
-
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
-                f"{_OPENROUTER_BASE_URL}/chat/completions",
-                headers=headers,
+                self._chat_url(),
+                headers=self._build_headers(),
                 json=body,
             )
             if resp.status_code != 200:
-                raise LLMError(f"OpenRouter API error {resp.status_code}: {resp.text}")
+                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
 
         content = data["choices"][0]["message"].get("content") or ""
@@ -362,7 +398,7 @@ class LLMProvider:
         tool arguments as the JSON response.
         """
         body: dict = {
-            "model": _strip_model_prefix(model),
+            "model": _strip_model_prefix(model, self.config.base_url),
             "messages": messages,
             "tools": tools,
             "tool_choice": {"type": "function", "function": {"name": tools[0]["function"]["name"]}},
@@ -370,21 +406,14 @@ class LLMProvider:
             "max_tokens": self.config.max_tokens,
         }
 
-        headers = {
-            "Authorization": f"Bearer {_get_api_key()}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/miracodeai/mira",
-            "X-Title": "Mira Code Reviewer",
-        }
-
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
-                f"{_OPENROUTER_BASE_URL}/chat/completions",
-                headers=headers,
+                self._chat_url(),
+                headers=self._build_headers(),
                 json=body,
             )
             if resp.status_code != 200:
-                raise LLMError(f"OpenRouter API error {resp.status_code}: {resp.text}")
+                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
 
         # Track usage
@@ -479,7 +508,7 @@ class LLMProvider:
         the agentic loop needs.
         """
         body: dict = {
-            "model": _strip_model_prefix(model),
+            "model": _strip_model_prefix(model, self.config.base_url),
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
@@ -487,21 +516,14 @@ class LLMProvider:
             "max_tokens": self.config.max_tokens,
         }
 
-        headers = {
-            "Authorization": f"Bearer {_get_api_key()}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/miracodeai/mira",
-            "X-Title": "Mira Code Reviewer",
-        }
-
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
-                f"{_OPENROUTER_BASE_URL}/chat/completions",
-                headers=headers,
+                self._chat_url(),
+                headers=self._build_headers(),
                 json=body,
             )
             if resp.status_code != 200:
-                raise LLMError(f"OpenRouter API error {resp.status_code}: {resp.text}")
+                raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
 
         usage = data.get("usage")

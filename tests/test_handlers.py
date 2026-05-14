@@ -117,6 +117,42 @@ async def test_handle_comment_review_keyword(
 @patch("mira.github_app.handlers.create_provider")
 @patch("mira.github_app.handlers.LLMProvider")
 @patch("mira.github_app.handlers.load_config")
+@pytest.mark.parametrize("verb", ["help", "?", "commands", "HELP", "Help"])
+async def test_handle_comment_help_posts_command_list(
+    mock_config: MagicMock,
+    mock_llm_cls: MagicMock,
+    mock_provider_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+    mock_pr_info: PRInfo,
+    verb: str,
+) -> None:
+    """`@bot help` (and its aliases `?` / `commands`, case-insensitive) posts a
+    help comment and exits without invoking the review engine or the LLM."""
+    mock_config.return_value = MagicMock()
+    mock_llm = AsyncMock()
+    mock_llm.complete = AsyncMock()  # should NOT be called
+    mock_llm_cls.return_value = mock_llm
+
+    mock_provider = AsyncMock()
+    mock_provider.get_pr_info = AsyncMock(return_value=mock_pr_info)
+    mock_provider.post_comment = AsyncMock()
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_comment_payload(f"@mira-bot {verb}")
+    await handle_comment(payload, mock_app_auth, "mira-bot")
+
+    mock_provider.post_comment.assert_awaited_once()
+    posted = mock_provider.post_comment.call_args[0][1]
+    assert posted.startswith("### Mira commands")
+    assert "@mira-bot review" in posted
+    assert "@mira-bot reject" in posted
+    # Help must not invoke the LLM (no diff fetch, no question reply).
+    mock_llm.complete.assert_not_awaited()
+
+
+@patch("mira.github_app.handlers.create_provider")
+@patch("mira.github_app.handlers.LLMProvider")
+@patch("mira.github_app.handlers.load_config")
 async def test_handle_comment_question(
     mock_config: MagicMock,
     mock_llm_cls: MagicMock,
