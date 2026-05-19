@@ -5,7 +5,7 @@
 <h1 align="center">Mira</h1>
 
 <p align="center">
-  <strong>The open-source AI code reviewer that's actually open.</strong>
+  <strong>Self-hosted AI code review. Your code, your dashboard, your LLM key.</strong>
 </p>
 
 <p align="center">
@@ -60,12 +60,12 @@ Plotted against every published competitor on the same subset, Mira sits in the 
 
 Measured on the same 25-PR offline subset (5 PRs each from Sentry, Grafana, Keycloak, Discourse, Cal.com), judged by Claude Sonnet 4.5.
 
-| | **Mira** | Top quality (Cubic-v2) | Top speed (Gemini) | CodeRabbit | GitHub Copilot |
+| | **Mira** | Cubic-v2 | Greptile | CodeRabbit | GitHub Copilot |
 |---|---:|---:|---:|---:|---:|
-| F1 | **39** | 56 | 27 | 32 | 31 |
-| Precision | **36%** | 50% | 25% | 24% | 24% |
-| Recall | **43%** | 65% | 29% | 50% | 43% |
-| Median time / PR | **~85s** | ~9m | ~2m | ~5m | ~10m |
+| F1 | **39** | 56 | 35 | 32 | 31 |
+| Precision | **36%** | 50% | 32% | 24% | 24% |
+| Recall | **43%** | 65% | 40% | 50% | 43% |
+| Median time / PR | **~85s** | ~9m | ~5m | ~5m | ~10m |
 
 > Methodology: scores measured against the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset with Claude Sonnet 4.5 as the judge.
 
