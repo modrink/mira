@@ -23,10 +23,6 @@ from mira.index.context import SourceFetcher
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Tool schemas (OpenAI function-calling format)
-# ---------------------------------------------------------------------------
-
 READ_FILE_TOOL = {
     "type": "function",
     "function": {
@@ -95,10 +91,6 @@ GREP_REPO_TOOL = {
     },
 }
 
-
-# ---------------------------------------------------------------------------
-# Executor
-# ---------------------------------------------------------------------------
 
 # Hard caps to keep tool output from blowing up the prompt or the API budget.
 _MAX_FILE_BYTES = 12_000  # ~3k tokens of source; truncate larger files
@@ -187,7 +179,6 @@ class AgenticToolExecutor:
         if not self.repo_tree:
             return "[grep unavailable: repo tree not loaded]"
 
-        # Path filter
         candidates: list[str]
         if path_glob:
             candidates = [p for p in self.repo_tree if fnmatch.fnmatch(p, path_glob)]
