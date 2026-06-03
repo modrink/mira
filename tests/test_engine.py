@@ -1371,9 +1371,8 @@ class TestSelfCritique:
             }
         )
 
-        # Patch LLMProvider so the critic LLM returns our canned response.
-        # The engine instantiates the critic via load_config(); easier to
-        # patch complete_with_tools globally.
+        # self_critique instantiates its own critic LLM via load_config(),
+        # so patch complete_with_tools on the provider class globally.
         from mira.llm import provider as provider_mod
 
         async def fake_complete_with_tools(self, messages, tools, temperature=None):

@@ -5,6 +5,10 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mira.llm.base import LLMProviderProtocol
 
 from mira.analysis.severity import classify_severity
 from mira.config import MiraConfig
@@ -28,7 +32,6 @@ from mira.llm.prompts.review import (
     build_review_prompt,
     build_walkthrough_prompt,
 )
-from mira.llm.provider import LLMProvider
 from mira.llm.response_parser import (
     convert_to_review_comments,
     convert_to_walkthrough_result,
@@ -255,13 +258,15 @@ class ReviewEngine:
     def __init__(
         self,
         config: MiraConfig,
-        llm: LLMProvider,
+        llm: LLMProviderProtocol,
         provider: BaseProvider | None = None,
         bot_name: str = "miracodeai",
         dry_run: bool = False,
+        indexing_llm: LLMProviderProtocol | None = None,
     ) -> None:
         self.config = config
         self.llm = llm
+        self.indexing_llm = indexing_llm or llm
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
