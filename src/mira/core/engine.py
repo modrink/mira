@@ -934,6 +934,7 @@ class ReviewEngine:
                 filtered,
                 _security_relevant_files(filtered),
                 pr_title,
+                indexing_llm=self.indexing_llm,
             )
             if self.config.review.security_pass
             else _asyncio.sleep(0, result=[])
@@ -969,6 +970,7 @@ class ReviewEngine:
                     final_comments,
                     learned_rules=learned_rules or None,
                     custom_rules=custom_rules or None,
+                    indexing_llm=self.indexing_llm,
                 )
             except Exception as exc:
                 logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
@@ -987,6 +989,7 @@ class ReviewEngine:
                     pr_title,
                     pr_description,
                     fallback=original_summary,
+                    indexing_llm=self.indexing_llm,
                 )
             except Exception as exc:
                 logger.warning("Summary regeneration failed, using original: %s", exc)

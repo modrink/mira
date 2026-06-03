@@ -111,11 +111,20 @@ async def agentic_review_loop(
     return ""
 
 
+def _indexing_llm(fallback: LLMProvider) -> LLMProvider:
+    """Build an indexing-tier provider, falling back to ``fallback`` on error."""
+    try:
+        return LLMProvider(llm_config_for("indexing", load_config().llm))
+    except Exception:
+        return fallback
+
+
 async def security_review_pass(
     llm: LLMProvider,
     files: list,
     narrowed: list,
     pr_title: str = "",
+    indexing_llm: LLMProvider | None = None,
 ) -> list[ReviewComment]:
     """Dedicated security review on the configured indexing model.
 
@@ -124,17 +133,16 @@ async def security_review_pass(
 
     `narrowed` is `files` with migrations/lockfiles/specs stripped (caller
     decides what counts); falls back to `files` if `narrowed` is empty.
+
+    `indexing_llm`, when passed, is the caller's already-built indexing-tier
+    provider; otherwise one is constructed from ``load_config()``.
     """
     if not files:
         return []
 
     target_files = narrowed or files
 
-    try:
-        base_config = load_config()
-        security_llm: LLMProvider = LLMProvider(llm_config_for("indexing", base_config.llm))
-    except Exception:
-        security_llm = llm
+    security_llm = indexing_llm or _indexing_llm(llm)
 
     messages = build_security_review_prompt(files=target_files, pr_title=pr_title)
     try:
@@ -186,11 +194,15 @@ async def self_critique(
     comments: list[ReviewComment],
     learned_rules: list[str] | None = None,
     custom_rules: list[dict[str, str]] | None = None,
+    indexing_llm: LLMProvider | None = None,
 ) -> list[ReviewComment]:
     """Re-verify each draft comment: keep only ones whose cited code proves the issue.
 
     Team-documented preferences (learned + custom rules) are surfaced to the
     critic so it doesn't drop comments that align with them as "style nits".
+
+    `indexing_llm`, when passed, is the caller's already-built indexing-tier
+    provider; otherwise one is constructed from ``load_config()``.
     """
     if not comments:
         return comments
@@ -240,11 +252,7 @@ async def self_critique(
         + "\n".join(draft_lines)
     )
 
-    try:
-        base_config = load_config()
-        critic_llm: LLMProvider = LLMProvider(llm_config_for("indexing", base_config.llm))
-    except Exception:
-        critic_llm = llm
+    critic_llm = indexing_llm or _indexing_llm(llm)
 
     try:
         raw = await critic_llm.complete_with_tools(
@@ -283,6 +291,7 @@ async def regenerate_summary(
     pr_title: str,
     pr_description: str,
     fallback: str,
+    indexing_llm: LLMProvider | None = None,
 ) -> str:
     """Rewrite the review summary from the final filed outputs.
 
@@ -290,6 +299,9 @@ async def regenerate_summary(
     them in prose only) or that were dropped by noise filter / self-critique
     / orphan filter. Regenerate from the surviving structured outputs so
     the prose stays grounded in what actually shipped.
+
+    `indexing_llm`, when passed, is the caller's already-built indexing-tier
+    provider; otherwise one is constructed from ``load_config()``.
     """
     if not comments and not key_issues:
         return "No issues found."
@@ -316,11 +328,7 @@ async def regenerate_summary(
         + "\n\nReturn just the summary text — no preamble, no quotes."
     )
 
-    try:
-        base_config = load_config()
-        summary_llm: LLMProvider = LLMProvider(llm_config_for("indexing", base_config.llm))
-    except Exception:
-        summary_llm = llm
+    summary_llm = indexing_llm or _indexing_llm(llm)
 
     try:
         text = await summary_llm.complete(

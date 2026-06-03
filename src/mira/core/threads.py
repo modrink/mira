@@ -52,6 +52,8 @@ def _extract_sections(
         end = min(total, t.line - 1 + context_lines + 1)
         ranges.append((start, end))
 
+    if not ranges:
+        return ""
     ranges.sort()
     merged: list[tuple[int, int]] = [ranges[0]]
     for start, end in ranges[1:]:
