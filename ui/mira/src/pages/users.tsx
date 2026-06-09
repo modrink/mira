@@ -19,6 +19,21 @@ import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { useAsync } from "@/lib/hooks"
 
+// Epoch seconds → "Just now" / "5m ago" / "3h ago" / "2d ago" / a date.
+// 0 (never logged in) → "Never".
+function lastSeen(ts: number): string {
+  if (!ts) return "Never"
+  const diff = Date.now() / 1000 - ts
+  if (diff < 60) return "Just now"
+  const mins = Math.floor(diff / 60)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  if (days < 30) return `${days}d ago`
+  return new Date(ts * 1000).toLocaleDateString()
+}
+
 export function UsersPage() {
   const { user: currentUser } = useAuth()
   const navigate = useNavigate()
@@ -88,6 +103,7 @@ export function UsersPage() {
               <TableRow>
                 <TableHead>User</TableHead>
                 <TableHead>Role</TableHead>
+                <TableHead>Last seen</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -118,6 +134,9 @@ export function UsersPage() {
                         User
                       </Badge>
                     )}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {lastSeen(u.last_login_at)}
                   </TableCell>
                   <TableCell className="text-right">
                     {u.id !== currentUser.id && (

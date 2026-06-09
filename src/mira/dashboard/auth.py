@@ -30,6 +30,7 @@ class UserResponse(BaseModel):
     username: str
     is_admin: bool
     theme: str = "dark"
+    last_login_at: float = 0
 
 
 class SetThemeRequest(BaseModel):
@@ -50,6 +51,7 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
         user = db.authenticate(body.username, body.password)
         if not user:
             return JSONResponse(status_code=401, content={"error": "Invalid credentials"})
+        db.record_login(user.id)
         token = db.create_session(user.id)
         response.set_cookie(
             SESSION_COOKIE,
@@ -108,7 +110,13 @@ def create_auth_router(db: AppDatabase) -> APIRouter:
         if not user or not user.is_admin:
             return JSONResponse(status_code=403, content={"error": "Admin access required"})
         return [
-            {"id": u.id, "username": u.username, "is_admin": u.is_admin} for u in db.list_users()
+            {
+                "id": u.id,
+                "username": u.username,
+                "is_admin": u.is_admin,
+                "last_login_at": u.last_login_at,
+            }
+            for u in db.list_users()
         ]
 
     @router.post("/users", response_model=UserResponse)

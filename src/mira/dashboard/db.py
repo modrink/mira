@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     is_admin INTEGER NOT NULL DEFAULT 0,
     theme TEXT NOT NULL DEFAULT 'dark',
-    created_at REAL NOT NULL DEFAULT 0
+    created_at REAL NOT NULL DEFAULT 0,
+    last_login_at REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -105,7 +106,8 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     theme TEXT NOT NULL DEFAULT 'dark',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    last_login_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -180,6 +182,7 @@ class User:
     is_admin: bool = False
     theme: str = "dark"
     created_at: float = 0.0
+    last_login_at: float = 0.0
 
 
 @dataclass
@@ -276,6 +279,11 @@ class AppDatabase:
         self._sqlite_conn.executescript(_SQLITE_SCHEMA)
         # Lightweight migrations for columns added after the original schema.
         # SQLite has no "IF NOT EXISTS" on ALTER, so we probe pragma_table_info.
+        user_cols = {r[1] for r in self._sqlite_conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "last_login_at" not in user_cols:
+            self._sqlite_conn.execute(
+                "ALTER TABLE users ADD COLUMN last_login_at REAL NOT NULL DEFAULT 0"
+            )
         cols = {r[1] for r in self._sqlite_conn.execute("PRAGMA table_info(repos)").fetchall()}
         if "last_indexed_at" not in cols:
             self._sqlite_conn.execute(
@@ -311,6 +319,10 @@ class AppDatabase:
             with self._pg_conn.cursor() as cur:
                 cur.execute(_PG_SCHEMA)
                 # Lightweight migration for columns added after launch.
+                cur.execute(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                    "last_login_at DOUBLE PRECISION NOT NULL DEFAULT 0"
+                )
                 cur.execute(
                     "ALTER TABLE repos ADD COLUMN IF NOT EXISTS last_indexed_at TIMESTAMPTZ"
                 )
@@ -462,19 +474,43 @@ class AppDatabase:
             with self._pg_conn.cursor() as cur:
                 cur.execute("UPDATE users SET theme = %s WHERE id = %s", (theme, user_id))
 
+    def record_login(self, user_id: int) -> None:
+        """Stamp a user's last-login time (called on each successful login)."""
+        now = time.time()
+        if self._backend == "sqlite":
+            assert self._sqlite_conn is not None
+            self._sqlite_conn.execute(
+                "UPDATE users SET last_login_at = ? WHERE id = ?", (now, user_id)
+            )
+            self._sqlite_conn.commit()
+        else:
+            assert self._pg_conn is not None
+            with self._pg_conn.cursor() as cur:
+                cur.execute("UPDATE users SET last_login_at = %s WHERE id = %s", (now, user_id))
+
     def list_users(self) -> list[User]:
         if self._backend == "sqlite":
             assert self._sqlite_conn is not None
             rows = self._sqlite_conn.execute(
-                "SELECT id, username, is_admin, created_at FROM users ORDER BY id"
+                "SELECT id, username, is_admin, created_at, last_login_at FROM users ORDER BY id"
             ).fetchall()
             return [
-                User(id=r[0], username=r[1], is_admin=bool(r[2]), created_at=r[3]) for r in rows
+                User(
+                    id=r[0],
+                    username=r[1],
+                    is_admin=bool(r[2]),
+                    created_at=r[3],
+                    last_login_at=r[4],
+                )
+                for r in rows
             ]
         assert self._pg_conn is not None
         with self._pg_conn.cursor() as cur:
-            cur.execute("SELECT id, username, is_admin FROM users ORDER BY id")
-            return [User(id=r[0], username=r[1], is_admin=bool(r[2])) for r in cur.fetchall()]
+            cur.execute("SELECT id, username, is_admin, last_login_at FROM users ORDER BY id")
+            return [
+                User(id=r[0], username=r[1], is_admin=bool(r[2]), last_login_at=r[3])
+                for r in cur.fetchall()
+            ]
 
     def delete_user(self, user_id: int) -> None:
         if self._backend == "sqlite":
