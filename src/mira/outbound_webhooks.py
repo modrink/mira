@@ -91,7 +91,13 @@ def detect_format(url: str) -> str:
         return "slack"
     # Classic Teams connector (*.webhook.office.com) and the newer Teams
     # Workflows endpoints (Power Automate / Logic Apps, *.logic.azure.com).
-    if host.endswith("webhook.office.com") or host.endswith(".logic.azure.com"):
+    # Match on a leading dot so a look-alike like "evilwebhook.office.com"
+    # can't pass via subdomain confusion.
+    if (
+        host == "webhook.office.com"
+        or host.endswith(".webhook.office.com")
+        or host.endswith(".logic.azure.com")
+    ):
         return "teams"
     return "generic"
 

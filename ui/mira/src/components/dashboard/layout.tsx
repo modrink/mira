@@ -104,13 +104,10 @@ function AppBreadcrumb() {
       ? parts[2]
       : null
   const { data: webhookData } = useAsync(
-    () => (webhookId ? api.getWebhooks() : Promise.resolve(null)),
+    () => (webhookId ? api.getWebhook(webhookId) : Promise.resolve(null)),
     [webhookId]
   )
-  const webhookName =
-    webhookId && webhookData
-      ? (webhookData.webhooks.find((w) => w.id === webhookId)?.name ?? null)
-      : null
+  const webhookName = webhookData?.name ?? null
 
   if (parts.length === 0) {
     return (

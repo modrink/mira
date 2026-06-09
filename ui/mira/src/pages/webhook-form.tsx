@@ -120,8 +120,13 @@ export function WebhookFormPage() {
 
   const remove = async () => {
     if (!id) return
-    await api.deleteWebhook(id)
-    navigate("/settings/webhooks")
+    setError(null)
+    try {
+      await api.deleteWebhook(id)
+      navigate("/settings/webhooks")
+    } catch (e) {
+      setError(parseDetail(e))
+    }
   }
 
   const test = async () => {

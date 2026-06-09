@@ -74,6 +74,10 @@ class TestFormatDetection:
     def test_generic(self):
         assert nf.detect_format("https://example.com/hook") == "generic"
 
+    def test_teams_lookalike_host_is_not_teams(self):
+        # Subdomain-confusion guard: must not match without the leading dot.
+        assert nf.detect_format("https://evilwebhook.office.com/x") == "generic"
+
     def test_mask_hides_middle(self):
         masked = nf.mask_url("https://hooks.slack.com/services/T0/B0/abcd1234")
         assert masked == "https://hooks.slack.com/…1234"

@@ -50,6 +50,7 @@ export function WebhooksPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const [refreshKey, setRefreshKey] = useState(0)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const { data, loading } = useAsync(() => api.getWebhooks(), [refreshKey])
   const webhooks: Webhook[] = data?.webhooks ?? []
   const events: EventOption[] = data?.available_events ?? []
@@ -66,8 +67,15 @@ export function WebhooksPage() {
     events.find((e) => e.value === value)?.label ?? value
 
   const remove = async (id: string) => {
-    await api.deleteWebhook(id)
-    setRefreshKey((k) => k + 1)
+    setDeleteError(null)
+    try {
+      await api.deleteWebhook(id)
+      setRefreshKey((k) => k + 1)
+    } catch (e) {
+      setDeleteError(
+        `Failed to delete webhook: ${e instanceof Error ? e.message : String(e)}`
+      )
+    }
   }
 
   return (
@@ -196,6 +204,10 @@ export function WebhooksPage() {
             </TableBody>
           </Table>
         </Card>
+      )}
+
+      {deleteError && (
+        <p className="text-sm break-words text-destructive">{deleteError}</p>
       )}
     </div>
   )
