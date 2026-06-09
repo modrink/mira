@@ -21,6 +21,7 @@ from mira.dashboard.api import (
     WebhookUpdate,
     create_webhook,
     delete_webhook,
+    get_webhook,
     list_webhooks,
     update_webhook,
 )
@@ -202,6 +203,30 @@ class TestAdminEndpoints:
             nf.REVIEW_FAILED,
             nf.INDEXING_COMPLETED,
         }
+
+    def test_get_by_id_returns_full_url(self, in_memory_db: AppDatabase):
+        created = create_webhook(
+            WebhookCreate(
+                name="eng",
+                url="https://hooks.slack.com/services/T/B/secret123",
+                events=[nf.REVIEW_COMPLETED],
+            ),
+            _admin(),
+        )
+        full = get_webhook(created["id"], _admin())
+        # The edit endpoint returns the real URL (the list masks it).
+        assert full["url"] == "https://hooks.slack.com/services/T/B/secret123"
+        assert full["format"] == "slack"
+
+    def test_get_by_id_404(self, in_memory_db: AppDatabase):
+        with pytest.raises(HTTPException) as exc:
+            get_webhook("nope", _admin())
+        assert exc.value.status_code == 404
+
+    def test_get_by_id_non_admin_forbidden(self, in_memory_db: AppDatabase):
+        with pytest.raises(HTTPException) as exc:
+            get_webhook("any", _non_admin())
+        assert exc.value.status_code == 403
 
     def test_create_rejects_bad_url(self, in_memory_db: AppDatabase):
         with pytest.raises(HTTPException) as exc:

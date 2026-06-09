@@ -560,6 +560,29 @@ def list_webhooks(request: Request) -> dict:
     return {"webhooks": webhooks, "available_events": AVAILABLE_EVENTS}
 
 
+@router.get("/api/admin/webhooks/{webhook_id}")
+def get_webhook(webhook_id: str, request: Request) -> dict:
+    """Full webhook incl. the unmasked URL — for the edit form (admin only).
+
+    The list endpoint masks URLs to avoid leaking secrets at a glance, but
+    editing a webhook needs the real value populated in the form.
+    """
+    _require_admin(request)
+    from mira.notifications import detect_format
+
+    w = next((x for x in _app_db.get_webhooks() if x.get("id") == webhook_id), None)
+    if w is None:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {
+        "id": w.get("id", ""),
+        "name": w.get("name", ""),
+        "url": w.get("url", ""),
+        "events": w.get("events", []),
+        "enabled": w.get("enabled", True),
+        "format": detect_format(w.get("url", "")),
+    }
+
+
 @router.post("/api/admin/webhooks")
 def create_webhook(body: WebhookCreate, request: Request) -> dict:
     _require_admin(request)

@@ -52,28 +52,25 @@ export function WebhookFormPage() {
 
   const [name, setName] = useState("")
   const [url, setUrl] = useState("")
-  const [urlPlaceholder, setUrlPlaceholder] = useState(
-    "https://hooks.slack.com/services/…"
-  )
   const [selected, setSelected] = useState<string[]>([])
-  const [enabled, setEnabled] = useState(true)
 
   useEffect(() => {
     // Non-admins never reach the loading UI (the component returns the
     // access-required notice first), so there's nothing to toggle here.
     if (!user?.is_admin) return
-    api
-      .getWebhooks()
-      .then((data) => {
-        setEvents(data.available_events)
-        if (isEdit) {
-          const w = data.webhooks.find((x) => x.id === id)
-          if (w) {
-            setName(w.name)
-            setSelected(w.events)
-            setEnabled(w.enabled)
-            setUrlPlaceholder(`${w.url_masked} — leave blank to keep`)
-          }
+    // The event picker comes from the list endpoint; for edit we also fetch
+    // the full webhook (incl. the real, unmasked URL) so the form is prefilled
+    // with the actual values.
+    Promise.all([
+      api.getWebhooks(),
+      isEdit && id ? api.getWebhook(id) : Promise.resolve(null),
+    ])
+      .then(([list, w]) => {
+        setEvents(list.available_events)
+        if (w) {
+          setName(w.name)
+          setUrl(w.url)
+          setSelected(w.events)
         }
         setLoading(false)
       })
@@ -105,14 +102,12 @@ export function WebhookFormPage() {
           name: name.trim(),
           url: url.trim(),
           events: selected,
-          enabled,
         })
       } else {
         await api.createWebhook({
           name: name.trim(),
           url: url.trim(),
           events: selected,
-          enabled,
         })
       }
       navigate("/settings/webhooks")
@@ -185,7 +180,7 @@ export function WebhookFormPage() {
                 </label>
                 <Input
                   id="wh-url"
-                  placeholder={urlPlaceholder}
+                  placeholder="https://hooks.slack.com/services/…"
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                 />
@@ -255,9 +250,7 @@ export function WebhookFormPage() {
             <div className="flex gap-2">
               <Button
                 onClick={save}
-                disabled={
-                  saving || selected.length === 0 || (!isEdit && !url.trim())
-                }
+                disabled={saving || selected.length === 0 || !url.trim()}
               >
                 {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 {isEdit ? "Save changes" : "Create webhook"}

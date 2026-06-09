@@ -251,12 +251,18 @@ async function putJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function deleteJson(path: string): Promise<void> {
-  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE", credentials: "include" })
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "DELETE",
+    credentials: "include",
+  })
   if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`)
 }
 
 async function patchJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { method: "PATCH", credentials: "include" })
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    credentials: "include",
+  })
   if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`)
   return res.json() as Promise<T>
 }
@@ -268,33 +274,36 @@ export const api = {
     fetchJson<{ version: string; bot_name: string }>("/api/version"),
 
   getSetupStatus: () =>
-    fetchJson<{ setup_complete: boolean; repo_count: number }>("/api/setup/status"),
+    fetchJson<{ setup_complete: boolean; repo_count: number }>(
+      "/api/setup/status"
+    ),
 
   syncRepos: () =>
     postJson<{ synced: number; removed: number }>("/api/repos/sync", {}),
 
   listPendingUninstalls: () =>
     fetchJson<{ installation_id: number; owner: string }[]>(
-      "/api/uninstalls/pending",
+      "/api/uninstalls/pending"
     ),
 
   keepUninstallData: (installation_id: number) =>
-    postJson<{ ok: boolean }>(
-      `/api/uninstalls/${installation_id}/keep`,
-      {},
-    ),
+    postJson<{ ok: boolean }>(`/api/uninstalls/${installation_id}/keep`, {}),
 
   deleteUninstallData: (installation_id: number) =>
     postJson<{ ok: boolean; removed: number }>(
       `/api/uninstalls/${installation_id}/delete`,
-      {},
+      {}
     ),
 
   getModels: () =>
     fetchJson<{
       indexing_model: string
       review_model: string
-      indexing_options: { value: string; label: string; recommended?: boolean }[]
+      indexing_options: {
+        value: string
+        label: string
+        recommended?: boolean
+      }[]
       review_options: { value: string; label: string; recommended?: boolean }[]
     }>("/api/settings/models"),
 
@@ -316,8 +325,9 @@ export const api = {
       effective: Record<string, unknown>
     }>("/api/admin/settings"),
 
-  saveGlobalSettings: (overrides: Record<string, Record<string, number | boolean | string>>) =>
-    putJson<{ ok: boolean }>("/api/admin/settings", { overrides }),
+  saveGlobalSettings: (
+    overrides: Record<string, Record<string, number | boolean | string>>
+  ) => putJson<{ ok: boolean }>("/api/admin/settings", { overrides }),
 
   saveModels: (indexing_model: string, review_model: string) =>
     putJson<{ ok: boolean }>("/api/settings/models", {
@@ -338,26 +348,35 @@ export const api = {
       available_events: { value: string; label: string; description: string }[]
     }>("/api/admin/webhooks"),
 
-  createWebhook: (body: {
-    name: string
-    url: string
-    events: string[]
-    enabled: boolean
-  }) => postJson<{ id: string }>("/api/admin/webhooks", body),
+  // Full webhook incl. the unmasked URL — for populating the edit form.
+  getWebhook: (id: string) =>
+    fetchJson<{
+      id: string
+      name: string
+      url: string
+      events: string[]
+      format: string
+    }>(`/api/admin/webhooks/${id}`),
+
+  createWebhook: (body: { name: string; url: string; events: string[] }) =>
+    postJson<{ id: string }>("/api/admin/webhooks", body),
 
   updateWebhook: (
     id: string,
-    body: { name?: string; url?: string; events?: string[]; enabled?: boolean },
+    body: { name?: string; url?: string; events?: string[] }
   ) => putJson<{ id: string }>(`/api/admin/webhooks/${id}`, body),
 
   deleteWebhook: (id: string) => deleteJson(`/api/admin/webhooks/${id}`),
 
   testWebhook: (id: string) =>
-    postJson<{ ok: boolean; detail: string }>(`/api/admin/webhooks/${id}/test`, {}),
+    postJson<{ ok: boolean; detail: string }>(
+      `/api/admin/webhooks/${id}/test`,
+      {}
+    ),
 
   completeSetup: (
     repos: { owner: string; repo: string; enabled: boolean }[],
-    index_mode: string,
+    index_mode: string
   ) =>
     postJson<{ status: string; repos: number }>("/api/setup/complete", {
       repos,
@@ -365,7 +384,9 @@ export const api = {
     }),
 
   getOrgStats: (period?: "day" | "week" | "month") =>
-    fetchJson<OrgStatsModel>(period ? `/api/stats?period=${period}` : "/api/stats"),
+    fetchJson<OrgStatsModel>(
+      period ? `/api/stats?period=${period}` : "/api/stats"
+    ),
 
   getIndexingStatus: () =>
     fetchJson<
@@ -423,11 +444,15 @@ export const api = {
     if (params.version) qs.set("version", params.version)
     if (params.kind) qs.set("kind", params.kind)
     if (params.is_dev !== undefined) qs.set("is_dev", String(params.is_dev))
-    return fetchJson<PackageSearchHit[]>(`/api/packages/search?${qs.toString()}`)
+    return fetchJson<PackageSearchHit[]>(
+      `/api/packages/search?${qs.toString()}`
+    )
   },
 
   getRepoVulnerabilities: (owner: string, repo: string) =>
-    fetchJson<VulnerabilityModel[]>(`/api/repos/${owner}/${repo}/vulnerabilities`),
+    fetchJson<VulnerabilityModel[]>(
+      `/api/repos/${owner}/${repo}/vulnerabilities`
+    ),
 
   getVulnerabilitiesSummary: () =>
     fetchJson<VulnerabilitySummary>(`/api/vulnerabilities/summary`),
@@ -460,74 +485,111 @@ export const api = {
         edge_kind: string
       }[]
     }>(
-      `/api/repos/${owner}/${repo}/blast-radius${paths && paths.length ? `?changed_paths=${encodeURIComponent(paths.join(","))}` : ""}`,
+      `/api/repos/${owner}/${repo}/blast-radius${paths && paths.length ? `?changed_paths=${encodeURIComponent(paths.join(","))}` : ""}`
     ),
 
-  getRelationships: () => fetchJson<RelationshipsResponse>("/api/relationships"),
+  getRelationships: () =>
+    fetchJson<RelationshipsResponse>("/api/relationships"),
 
   getRelatedRepos: (owner: string, repo: string) =>
-    fetchJson<RelatedRepoModel[]>(
-      `/api/relationships/${owner}/${repo}`,
-    ),
+    fetchJson<RelatedRepoModel[]>(`/api/relationships/${owner}/${repo}`),
 
   // Indexing
   triggerIndex: (owner: string, repo: string, full = false) =>
-    postJson<{ status: string }>(`/api/repos/${owner}/${repo}/index?full=${full}`, {}),
+    postJson<{ status: string }>(
+      `/api/repos/${owner}/${repo}/index?full=${full}`,
+      {}
+    ),
 
   cancelIndex: (owner: string, repo: string) =>
     deleteJson(`/api/repos/${owner}/${repo}/index`),
 
   // Review events
   listReviews: (owner: string, repo: string, limit = 50) =>
-    fetchJson<ReviewEventModel[]>(`/api/repos/${owner}/${repo}/reviews?limit=${limit}`),
+    fetchJson<ReviewEventModel[]>(
+      `/api/repos/${owner}/${repo}/reviews?limit=${limit}`
+    ),
 
   // Review context
   listContext: (owner: string, repo: string) =>
     fetchJson<ReviewContextModel[]>(`/api/repos/${owner}/${repo}/context`),
 
-  createContext: (owner: string, repo: string, title: string, content: string) =>
-    postJson<ReviewContextModel>(`/api/repos/${owner}/${repo}/context`, { title, content }),
+  createContext: (
+    owner: string,
+    repo: string,
+    title: string,
+    content: string
+  ) =>
+    postJson<ReviewContextModel>(`/api/repos/${owner}/${repo}/context`, {
+      title,
+      content,
+    }),
 
-  updateContext: (owner: string, repo: string, id: number, title: string, content: string) =>
-    putJson<ReviewContextModel>(`/api/repos/${owner}/${repo}/context/${id}`, { title, content }),
+  updateContext: (
+    owner: string,
+    repo: string,
+    id: number,
+    title: string,
+    content: string
+  ) =>
+    putJson<ReviewContextModel>(`/api/repos/${owner}/${repo}/context/${id}`, {
+      title,
+      content,
+    }),
 
   deleteContext: (owner: string, repo: string, id: number) =>
     deleteJson(`/api/repos/${owner}/${repo}/context/${id}`),
 
   // Relationship overrides
-  setOverride: (source_repo: string, target_repo: string, status: "confirmed" | "denied") =>
-    postJson<OverrideModel>("/api/relationships/overrides", { source_repo, target_repo, status }),
+  setOverride: (
+    source_repo: string,
+    target_repo: string,
+    status: "confirmed" | "denied"
+  ) =>
+    postJson<OverrideModel>("/api/relationships/overrides", {
+      source_repo,
+      target_repo,
+      status,
+    }),
 
   deleteOverride: (source_repo: string, target_repo: string) =>
-    deleteJson(`/api/relationships/overrides?source_repo=${source_repo}&target_repo=${target_repo}`),
+    deleteJson(
+      `/api/relationships/overrides?source_repo=${source_repo}&target_repo=${target_repo}`
+    ),
 
-  listOverrides: () => fetchJson<OverrideModel[]>("/api/relationships/overrides"),
+  listOverrides: () =>
+    fetchJson<OverrideModel[]>("/api/relationships/overrides"),
 
   // Custom edges
   addCustomEdge: (source_repo: string, target_repo: string, reason: string) =>
-    postJson<CustomEdgeModel>("/api/relationships/custom", { source_repo, target_repo, reason }),
+    postJson<CustomEdgeModel>("/api/relationships/custom", {
+      source_repo,
+      target_repo,
+      reason,
+    }),
 
-  deleteCustomEdge: (id: number) => deleteJson(`/api/relationships/custom/${id}`),
+  deleteCustomEdge: (id: number) =>
+    deleteJson(`/api/relationships/custom/${id}`),
 
-  listCustomEdges: () => fetchJson<CustomEdgeModel[]>("/api/relationships/custom"),
+  listCustomEdges: () =>
+    fetchJson<CustomEdgeModel[]>("/api/relationships/custom"),
 
   // User management (admin only)
   listUsers: () =>
     fetchJson<{ id: number; username: string; is_admin: boolean }[]>(
-      "/api/auth/users",
+      "/api/auth/users"
     ),
 
   createUser: (username: string, password: string, is_admin: boolean) =>
     postJson<{ id: number; username: string; is_admin: boolean }>(
       "/api/auth/users",
-      { username, password, is_admin },
+      { username, password, is_admin }
     ),
 
   deleteUser: (id: number) => deleteJson(`/api/auth/users/${id}`),
 
   // Global rules
-  listGlobalRules: () =>
-    fetchJson<RuleModel[]>("/api/rules/global"),
+  listGlobalRules: () => fetchJson<RuleModel[]>("/api/rules/global"),
 
   createGlobalRule: (title: string, content: string) =>
     postJson<RuleModel>("/api/rules/global", { title, content }),
@@ -544,11 +606,28 @@ export const api = {
   listRepoRules: (owner: string, repo: string) =>
     fetchJson<RuleModel[]>(`/api/repos/${owner}/${repo}/rules`),
 
-  createRepoRule: (owner: string, repo: string, title: string, content: string) =>
-    postJson<RuleModel>(`/api/repos/${owner}/${repo}/rules`, { title, content }),
+  createRepoRule: (
+    owner: string,
+    repo: string,
+    title: string,
+    content: string
+  ) =>
+    postJson<RuleModel>(`/api/repos/${owner}/${repo}/rules`, {
+      title,
+      content,
+    }),
 
-  updateRepoRule: (owner: string, repo: string, id: number, title: string, content: string) =>
-    putJson<RuleModel>(`/api/repos/${owner}/${repo}/rules/${id}`, { title, content }),
+  updateRepoRule: (
+    owner: string,
+    repo: string,
+    id: number,
+    title: string,
+    content: string
+  ) =>
+    putJson<RuleModel>(`/api/repos/${owner}/${repo}/rules/${id}`, {
+      title,
+      content,
+    }),
 
   deleteRepoRule: (owner: string, repo: string, id: number) =>
     deleteJson(`/api/repos/${owner}/${repo}/rules/${id}`),
