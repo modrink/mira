@@ -96,7 +96,7 @@ export function UsersPage() {
                 <TableRow key={u.id}>
                   <TableCell>
                     <div className="flex items-center gap-3">
-                      <UserAvatar seed={u.username} className="h-8 w-8" />
+                      <UserAvatar seed={u.username} className="h-7 w-7" />
                       <span className="font-medium">{u.username}</span>
                       {u.id === currentUser.id && (
                         <span className="text-xs text-muted-foreground">

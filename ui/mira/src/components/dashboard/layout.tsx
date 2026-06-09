@@ -33,7 +33,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -210,9 +209,6 @@ export function DashboardLayout() {
 
         <SidebarFooter>
           <SidebarMenu>
-            <SidebarMenuItem>
-              <ThemeToggle />
-            </SidebarMenuItem>
             <UserMenu />
           </SidebarMenu>
         </SidebarFooter>
@@ -235,9 +231,28 @@ export function DashboardLayout() {
 
 function UserMenu() {
   const { user, logout } = useAuth()
+  const { theme, setTheme } = useTheme()
   if (!user) return null
 
   const role = user.is_admin ? "Admin" : "User"
+
+  const isDark =
+    theme === "dark" ||
+    (theme === "system" &&
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches)
+
+  const toggleTheme = () => {
+    const newTheme = isDark ? "light" : "dark"
+    setTheme(newTheme)
+    // Persist to the user profile in the DB.
+    fetch(`${API_BASE}/api/auth/theme`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ theme: newTheme }),
+    }).catch(() => {})
+  }
 
   return (
     <SidebarMenuItem>
@@ -253,15 +268,10 @@ function UserMenu() {
           </SidebarMenuButton>
         </DropdownMenuTrigger>
         <DropdownMenuContent side="top" align="start" className="min-w-52">
-          <DropdownMenuLabel>
-            <div className="flex items-center gap-2">
-              <UserAvatar seed={user.username} className="size-7" />
-              <div className="flex flex-col leading-tight">
-                <span className="text-sm font-medium">{user.username}</span>
-                <span className="text-xs text-muted-foreground">{role}</span>
-              </div>
-            </div>
-          </DropdownMenuLabel>
+          <DropdownMenuItem onClick={toggleTheme}>
+            {isDark ? <Sun /> : <Moon />}
+            {isDark ? "Light mode" : "Dark mode"}
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem variant="destructive" onClick={logout}>
             <LogOut /> Log out
@@ -269,35 +279,5 @@ function UserMenu() {
         </DropdownMenuContent>
       </DropdownMenu>
     </SidebarMenuItem>
-  )
-}
-
-function ThemeToggle() {
-  const { theme, setTheme } = useTheme()
-
-  const isDark =
-    theme === "dark" ||
-    (theme === "system" &&
-      typeof window !== "undefined" &&
-      window.matchMedia("(prefers-color-scheme: dark)").matches)
-
-  const next = () => {
-    const newTheme = isDark ? "light" : "dark"
-    setTheme(newTheme)
-    // Save to user profile in DB
-    const API_BASE = import.meta.env.VITE_API_URL || ""
-    fetch(`${API_BASE}/api/auth/theme`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ theme: newTheme }),
-    }).catch(() => {})
-  }
-
-  return (
-    <SidebarMenuButton size="sm" onClick={next}>
-      {isDark ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
-      <span className="text-xs">{isDark ? "Dark" : "Light"}</span>
-    </SidebarMenuButton>
   )
 }
