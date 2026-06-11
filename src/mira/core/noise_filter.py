@@ -35,7 +35,9 @@ def _is_duplicate(
 
     Two comments are duplicates if:
     - Same file + overlapping lines + any title similarity (>= 0.25), OR
-    - Same file + exact same line + different titles (line-overlap alone is enough)
+    - Same file + exact same line + same category (one line can host two
+      distinct findings — e.g. a resource leak and an injection on one
+      `open()` call — so different categories are kept apart)
     - Same file + non-overlapping lines but near-identical titles (>= title_threshold)
     """
     title_sim = _jaccard_similarity(a.title, b.title)
@@ -47,11 +49,13 @@ def _is_duplicate(
 
     overlap = _lines_overlap(a, b)
 
-    # Exact same line — almost certainly about the same code
+    # Exact same line + same category — almost certainly the same finding.
+    # Different categories are distinct findings even on the same line;
+    # collapsing them lets a later critique drop take both out.
     end_a = a.end_line or a.line
     end_b = b.end_line or b.line
     same_line = (a.line == b.line) and (end_a == end_b)
-    if same_line:
+    if same_line and a.category == b.category:
         return True
 
     # Overlapping lines — lower title similarity bar
