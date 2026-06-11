@@ -364,11 +364,15 @@ class ModelsResponse(BaseModel):
     review_model: str
     indexing_options: list[ModelOption]
     review_options: list[ModelOption]
+    # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high").
+    review_thinking_mode: str
+    thinking_options: list[ModelOption]
 
 
 class ModelsUpdate(BaseModel):
     indexing_model: str
     review_model: str
+    review_thinking_mode: str = "off"
 
 
 @router.get("/api/settings/models", response_model=ModelsResponse)
@@ -377,19 +381,24 @@ def get_models() -> ModelsResponse:
     from mira.dashboard.models_config import (
         INDEXING_MODELS,
         REVIEW_MODELS,
+        THINKING_MODES,
         get_indexing_model,
         get_review_model,
+        get_review_thinking_mode,
     )
 
     config = load_config()
     indexing = get_indexing_model(config.llm, _app_db.get_setting("indexing_model"))
     review = get_review_model(config.llm, _app_db.get_setting("review_model"))
+    thinking = get_review_thinking_mode(config.llm, _app_db.get_setting("review_thinking_mode"))
 
     return ModelsResponse(
         indexing_model=indexing,
         review_model=review,
         indexing_options=[ModelOption(**m) for m in INDEXING_MODELS],
         review_options=[ModelOption(**m) for m in REVIEW_MODELS],
+        review_thinking_mode=thinking or "off",
+        thinking_options=[ModelOption(**m) for m in THINKING_MODES],
     )
 
 
@@ -491,6 +500,7 @@ def set_global_settings(body: GlobalSettingsUpdate, request: Request) -> dict:
 
 @router.put("/api/settings/models")
 def set_models(body: ModelsUpdate) -> dict:
+    from mira.dashboard.models_config import THINKING_MODE_VALUES
     from mira.llm.registry import is_supported
 
     # Reject unsupported or wrong-purpose models. Without this, an admin can
@@ -506,8 +516,21 @@ def set_models(body: ModelsUpdate) -> dict:
             status_code=400,
             detail=f"{body.review_model!r} is not a supported review model.",
         )
+    if body.review_thinking_mode not in THINKING_MODE_VALUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{body.review_thinking_mode!r} is not a valid thinking mode.",
+        )
     _app_db.set_setting("indexing_model", body.indexing_model)
     _app_db.set_setting("review_model", body.review_model)
+    # Clear "off" to "" rather than persisting the literal — "off" is the
+    # default, and a stored value would shadow a mira.yaml
+    # `review_reasoning_effort` override. "" (not None — the column is NOT NULL)
+    # reads back as unset so the config fallback chain works.
+    if body.review_thinking_mode and body.review_thinking_mode != "off":
+        _app_db.set_setting("review_thinking_mode", body.review_thinking_mode)
+    else:
+        _app_db.set_setting("review_thinking_mode", "")
     _app_db.mark_setup_complete()
     return {"ok": True}
 

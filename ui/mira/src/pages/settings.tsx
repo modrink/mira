@@ -36,6 +36,10 @@ export function SettingsPage() {
   const [reviewOptions, setReviewOptions] = useState<
     { value: string; label: string; recommended?: boolean }[]
   >([])
+  const [thinkingMode, setThinkingMode] = useState("off")
+  const [thinkingOptions, setThinkingOptions] = useState<
+    { value: string; label: string; recommended?: boolean }[]
+  >([])
   const [savingModels, setSavingModels] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
 
@@ -66,6 +70,8 @@ export function SettingsPage() {
       setReviewModel(m.review_model)
       setIndexingOptions(m.indexing_options)
       setReviewOptions(m.review_options)
+      setThinkingMode(m.review_thinking_mode)
+      setThinkingOptions(m.thinking_options)
     })
     api.getGlobalSettings().then((s) => {
       setEffective(
@@ -91,7 +97,7 @@ export function SettingsPage() {
 
   const saveModels = async () => {
     setSavingModels(true)
-    await api.saveModels(indexingModel, reviewModel)
+    await api.saveModels(indexingModel, reviewModel, thinkingMode)
     setSavingModels(false)
     setModelsSaved(true)
     setTimeout(() => setModelsSaved(false), 2000)
@@ -360,6 +366,27 @@ export function SettingsPage() {
               <p className="text-xs text-muted-foreground">
                 Used to analyze PRs and post review comments. A more powerful
                 model gives better review quality.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Review Thinking Mode</label>
+              <Select value={thinkingMode} onValueChange={setThinkingMode}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {thinkingOptions.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Extended reasoning budget for reviews — improves depth on
+                capable models at the cost of latency and tokens. Works on
+                OpenRouter and Bedrock (Claude); on other endpoints it's
+                skipped automatically when unsupported.
               </p>
             </div>
             <div className="flex items-center gap-3">

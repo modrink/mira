@@ -26,6 +26,12 @@ class LLMConfig(BaseModel):
     # Optional per-purpose overrides. Fall back to `model` if not set.
     indexing_model: str | None = None
     review_model: str | None = None
+    # Extended-thinking effort for reviews ("low"/"medium"/"high"; None/"off" =
+    # no reasoning). `review_reasoning_effort` is the mira.yaml-level override;
+    # `reasoning_effort` is the resolved value the provider reads (set by
+    # `llm_config_for`, the same way `model` is resolved from `review_model`).
+    review_reasoning_effort: str | None = None
+    reasoning_effort: str | None = None
     temperature: float = 0.2
     max_tokens: int = 4096
     max_context_tokens: int = 120_000
