@@ -302,3 +302,74 @@ class TestStripModelPrefix:
 
         result = _strip_model_prefix("llama3.1:latest", "http://localhost:11434/v1")
         assert result == "llama3.1:latest"
+
+
+class TestToolChoiceFallback:
+    """#82: thinking models (deepseek) 400 on a forced tool_choice; retry
+    with "auto" rather than failing the review."""
+
+    _TOOL = {"type": "function", "function": {"name": "submit_review", "parameters": {}}}
+
+    def _client(self, responses):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
+    @pytest.mark.asyncio
+    async def test_retries_with_auto_on_tool_choice_400(self):
+        provider = LLMProvider(LLMConfig(model="deepseek/deepseek-v4-pro"))
+        rejected = _mock_httpx_response(
+            {"error": {"message": "thinking mode does not support this tool_choice"}},
+            status_code=400,
+        )
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([rejected, ok])
+            result = await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            n_posts = len(cls.return_value.post.call_args_list)
+
+        assert result == '{"comments": []}'
+        assert n_posts == 2  # forced 400'd, then the auto retry
+        assert "deepseek/deepseek-v4-pro" in provider._no_forced_tool_choice
+
+    @pytest.mark.asyncio
+    async def test_remembered_model_skips_forced_attempt(self):
+        provider = LLMProvider(LLMConfig(model="deepseek/deepseek-v4-pro"))
+        provider._no_forced_tool_choice.add("deepseek/deepseek-v4-pro")
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([ok])
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            posts = cls.return_value.post.call_args_list
+
+        assert len(posts) == 1  # straight to auto, no wasted forced attempt
+        assert posts[0].kwargs["json"]["tool_choice"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_unrelated_400_does_not_trigger_auto_fallback(self):
+        # A non-tool_choice 400 should error out, not flip the model to auto.
+        provider = LLMProvider(LLMConfig(model="anthropic/claude-sonnet-4-6"))
+        err = _mock_httpx_response(
+            {"error": {"message": "context length exceeded"}}, status_code=400
+        )
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=err)
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("mira.llm.provider.httpx.AsyncClient", return_value=client),
+            pytest.raises(LLMError),
+        ):
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+        assert "anthropic/claude-sonnet-4-6" not in provider._no_forced_tool_choice

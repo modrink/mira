@@ -326,6 +326,9 @@ class LLMProvider:
         self.config = config
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        # Models that 400 on a forced tool_choice (deepseek thinking mode);
+        # remembered so we send tool_choice="auto" instead.
+        self._no_forced_tool_choice: set[str] = set()
 
     def _chat_url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -408,11 +411,18 @@ class LLMProvider:
         The LLM returns structured data by 'calling' a tool. We extract the
         tool arguments as the JSON response.
         """
+        api_model = _strip_model_prefix(model, self.config.base_url)
+        forced_choice: dict | str = {
+            "type": "function",
+            "function": {"name": tools[0]["function"]["name"]},
+        }
         body: dict = {
-            "model": _strip_model_prefix(model, self.config.base_url),
+            "model": api_model,
             "messages": messages,
             "tools": tools,
-            "tool_choice": {"type": "function", "function": {"name": tools[0]["function"]["name"]}},
+            # Force the one tool for structured args; models that reject a
+            # forced choice fall back to "auto" (handled on the 400 below).
+            "tool_choice": "auto" if api_model in self._no_forced_tool_choice else forced_choice,
             "temperature": temperature if temperature is not None else self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
@@ -423,6 +433,16 @@ class LLMProvider:
                 headers=self._build_headers(),
                 json=body,
             )
+            if (
+                resp.status_code == 400
+                and body["tool_choice"] != "auto"
+                and "tool_choice" in resp.text.lower()
+            ):
+                # Forced choice unsupported — remember it and let the model pick.
+                logger.info("Model %s rejected forced tool_choice; retrying with auto", api_model)
+                self._no_forced_tool_choice.add(api_model)
+                body["tool_choice"] = "auto"
+                resp = await client.post(self._chat_url(), headers=self._build_headers(), json=body)
             if resp.status_code != 200:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
