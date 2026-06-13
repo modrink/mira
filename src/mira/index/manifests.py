@@ -312,9 +312,10 @@ def parse_composer_json(content: str, file_path: str) -> list[ParsedPackage]:
         for name, version in block.items():
             if not isinstance(name, str) or not isinstance(version, str):
                 continue
-            # Skip platform requirements: php, ext-*, lib-*, etc.
-            lower = name.lower()
-            if lower == "php" or lower.startswith("ext-") or lower.startswith("lib-"):
+            # Skip platform/virtual requirements: php, ext-*, lib-*, hhvm,
+            # composer-plugin-api, etc. Real Packagist packages are always
+            # namespaced as vendor/package (contain "/").
+            if "/" not in name:
                 continue
             out.append(
                 ParsedPackage(

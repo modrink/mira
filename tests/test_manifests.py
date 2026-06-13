@@ -199,8 +199,12 @@ class TestComposerJson:
             {
                 "require": {
                     "php": ">=8.1",
+                    "php-64bit": ">=8.1",
                     "ext-json": "*",
                     "lib-openssl": ">=1.0",
+                    "composer-plugin-api": "^2.0",
+                    "composer-runtime-api": "^2.0",
+                    "hhvm": "^4.0",
                     "symfony/console": "^6.0",
                 }
             }
