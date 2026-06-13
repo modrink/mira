@@ -470,7 +470,7 @@ export function RepoDetailPage() {
               <CardTitle>Dependencies</CardTitle>
               <CardDescription>
                 Packages declared in package.json, requirements.txt,
-                pyproject.toml, go.mod, and Dockerfile.
+                pyproject.toml, go.mod, composer.json, and Dockerfile.
               </CardDescription>
             </CardHeader>
             <CardContent>
