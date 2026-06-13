@@ -133,9 +133,8 @@ SUBMIT_CRITIQUE_TOOL = {
     "function": {
         "name": "submit_critique",
         "description": (
-            "For each draft review comment, decide whether it's a real, "
-            "verifiable issue. Return the indices of comments worth keeping "
-            "and a brief reason for each rejection."
+            "For each draft review comment, grade how well the evidence in "
+            "the diff supports the claimed issue."
         ),
         "parameters": {
             "type": "object",
@@ -150,13 +149,18 @@ SUBMIT_CRITIQUE_TOOL = {
                                 "type": "integer",
                                 "description": "Zero-based index of the draft comment.",
                             },
-                            "keep": {
-                                "type": "boolean",
+                            "evidence": {
+                                "type": "string",
+                                "enum": ["proven", "plausible", "unsupported"],
                                 "description": (
-                                    "true if the comment cites specific code that proves "
-                                    "the issue, the reasoning is correct, and the fix is "
-                                    "actionable. false for confident-but-wrong claims, "
-                                    "speculation, or 'while I'm here' style nits."
+                                    "proven: the shown code demonstrates the issue and the "
+                                    "reasoning is correct. "
+                                    "plausible: the issue is consistent with the shown code "
+                                    "but depends on behaviour or code not shown — this is a "
+                                    "valid grade for real findings, not a failure. "
+                                    "unsupported: the shown code contradicts the claim, the "
+                                    "reasoning is wrong, or it's a style preference dressed "
+                                    "up as an issue."
                                 ),
                             },
                             "reason": {
@@ -164,7 +168,7 @@ SUBMIT_CRITIQUE_TOOL = {
                                 "description": "One short sentence explaining the verdict.",
                             },
                         },
-                        "required": ["index", "keep", "reason"],
+                        "required": ["index", "evidence", "reason"],
                     },
                 },
             },
@@ -681,12 +685,14 @@ class LLMProvider:
                 f"LLM tool-call failed with {self.config.model}: {primary_err}"
             ) from primary_err
 
-    async def review(self, messages: list[dict[str, str]]) -> str:
+    async def review(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         """Submit a review using tool calling.
 
         Returns the JSON string containing review comments, key issues, and summary.
         """
-        return await self.complete_with_tools(messages, tools=[SUBMIT_REVIEW_TOOL])
+        return await self.complete_with_tools(
+            messages, tools=[SUBMIT_REVIEW_TOOL], temperature=temperature
+        )
 
     async def walkthrough(self, messages: list[dict[str, str]]) -> str:
         """Submit a walkthrough using tool calling.

@@ -116,7 +116,12 @@ def filter_noise(
     if review_round >= 3:
         confidence_floor = max(confidence_floor, 0.85)
 
-    result = [c for c in comments if c.confidence >= confidence_floor]
+    category_floors = config.category_confidence_thresholds
+
+    def _floor(c: ReviewComment) -> float:
+        return max(confidence_floor, category_floors.get(c.category, 0.0))
+
+    result = [c for c in comments if c.confidence >= _floor(c)]
     result = [c for c in result if c.severity >= min_severity]
     result.sort(key=lambda c: (c.severity, c.confidence), reverse=True)
     result = _deduplicate(result)

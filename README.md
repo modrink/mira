@@ -58,14 +58,14 @@ Plotted against every published competitor on the same subset, Mira sits in the 
 
 ![Speed vs quality: Mira on the Pareto frontier](.github/assets/benchmark-by-language.svg)
 
-Measured on the same 25-PR offline subset (5 PRs each from Sentry, Grafana, Keycloak, Discourse, Cal.com), judged by Claude Sonnet 4.5.
+Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.5.
 
 | | **Mira** | Cubic-v2 | Greptile | CodeRabbit | GitHub Copilot |
 |---|---:|---:|---:|---:|---:|
-| F1 | **39** | 56 | 35 | 32 | 31 |
-| Precision | **36%** | 50% | 32% | 24% | 24% |
-| Recall | **43%** | 65% | 40% | 50% | 43% |
-| Median time / PR | **~85s** | ~9m | ~5m | ~5m | ~10m |
+| F1 | **44** | 56 | 35 | 32 | 31 |
+| Precision | **43%** | 50% | 32% | 24% | 24% |
+| Recall | **46%** | 65% | 40% | 50% | 43% |
+| Median time / PR | **~77s** | ~9m | ~5m | ~5m | ~10m |
 
 > Methodology: scores measured against the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset with Claude Sonnet 4.5 as the judge.
 

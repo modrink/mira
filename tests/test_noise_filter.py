@@ -346,3 +346,30 @@ class TestRoundAwareFiltering:
         result = filter_noise(comments, FilterConfig(confidence_threshold=0.7), review_round=2)
         assert len(result) == 1
         assert result[0].severity == Severity.BLOCKER
+
+
+class TestCategoryConfidenceThresholds:
+    CONFIG = FilterConfig(
+        confidence_threshold=0.7,
+        category_confidence_thresholds={"security": 0.85},
+    )
+
+    def test_category_floor_applies_to_its_category(self):
+        comments = [
+            _make_comment(category="security", confidence=0.8, line=1, title="A"),
+            _make_comment(category="security", confidence=0.9, line=20, title="B"),
+        ]
+        result = filter_noise(comments, self.CONFIG)
+        assert [c.title for c in result] == ["B"]
+
+    def test_other_categories_use_global_floor(self):
+        comments = [_make_comment(category="bug", confidence=0.75, line=1)]
+        assert len(filter_noise(comments, self.CONFIG)) == 1
+
+    def test_category_floor_cannot_lower_global(self):
+        config = FilterConfig(
+            confidence_threshold=0.7,
+            category_confidence_thresholds={"bug": 0.5},
+        )
+        comments = [_make_comment(category="bug", confidence=0.6, line=1)]
+        assert filter_noise(comments, config) == []
