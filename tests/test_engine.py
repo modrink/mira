@@ -1338,7 +1338,9 @@ class TestIncrementalDiff:
         )
         await engine.review_pr("https://github.com/o/r/pull/1")
 
-        mock_db.set_last_reviewed_sha.assert_called_once_with("o", "r", 1, "HEAD_SHA")
+        mock_db.set_last_reviewed_sha.assert_called_once_with(
+            "o", "r", 1, "HEAD_SHA", platform="github"
+        )
 
 
 class TestSelfCritique:

@@ -1,4 +1,10 @@
-"""OpenRouter API provider with retry/fallback and tool calling support."""
+"""OpenAI-compatible API provider with retry/fallback and tool calling support.
+
+Per-provider quirks (attribution headers, model-prefix policy, reasoning
+remapping) come from the profile registry in ``mira.llm.providers``, matched
+to the configured ``base_url``. OpenRouter is one profile among many; any
+OpenAI-compatible endpoint works, with or without a profile entry.
+"""
 
 from __future__ import annotations
 
@@ -11,18 +17,9 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from mira.config import LLMConfig
 from mira.exceptions import LLMError
+from mira.llm import providers
 
 logger = logging.getLogger(__name__)
-
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-
-
-def _is_openrouter(base_url: str) -> bool:
-    """OpenRouter-specific behavior (model prefix stripping, ranking headers)
-    is gated on the configured base_url. Any other URL (vLLM, Ollama,
-    LiteLLM proxy, LocalAI, Together, Fireworks, Groq, etc.) gets the
-    portable OpenAI-compatible request shape."""
-    return base_url.rstrip("/") == _OPENROUTER_BASE_URL.rstrip("/")
 
 
 SUBMIT_REVIEW_TOOL = {
@@ -277,18 +274,20 @@ SUBMIT_WALKTHROUGH_TOOL = {
 }
 
 
-def _get_api_key(config: LLMConfig) -> str:
+def _get_api_key(config: LLMConfig, profile: dict | None = None) -> str:
     """Resolve the API key for the configured endpoint.
 
-    Reads from `config.api_key_env` first, then falls back to the legacy
-    `OPENROUTER_API_KEY` / `OPENAI_API_KEY` lookup for backward compatibility.
-    If `api_key_env` is explicitly set to "" the empty string is returned
-    without error — useful for local endpoints (Ollama, llama.cpp server)
-    that don't require auth.
+    Reads `config.api_key_env` first, then the matched provider profile's
+    `api_key_env`, then the legacy `OPENROUTER_API_KEY` / `OPENAI_API_KEY`
+    lookup for backward compatibility. If `api_key_env` is explicitly "" the
+    empty string is returned without error — useful for local endpoints
+    (Ollama, llama.cpp server) that don't require auth.
     """
     if config.api_key_env == "":
         return ""
     key = os.environ.get(config.api_key_env, "")
+    if not key and profile and profile.get("api_key_env"):
+        key = os.environ.get(profile["api_key_env"], "")
     if not key:
         # Back-compat with pre-`api_key_env` setups.
         key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
@@ -302,32 +301,31 @@ def _get_api_key(config: LLMConfig) -> str:
 
 
 def _strip_model_prefix(model: str, base_url: str) -> str:
-    """Strip provider prefix for non-OpenRouter endpoints.
+    """Apply the endpoint's model-prefix policy from its provider profile.
 
-    OpenRouter routes based on the full model string with provider prefix.
-    Other endpoints (MiniMax, Azure, etc.) expect just the model name without
-    the provider prefix (e.g., 'minimax-M2.7' not 'minimax/minimax-M2.7').
+    'keep' (OpenRouter) routes on the full `vendor/model` string and only sheds
+    a redundant self-prefix (`openrouter/…`). 'strip' (the default for other
+    endpoints) sends the bare model name (e.g. 'minimax/MiniMax-M2.7' →
+    'MiniMax-M2.7').
     """
-    if _is_openrouter(base_url):
-        # OpenRouter: only strip openrouter/ prefix
-        if model.startswith("openrouter/"):
-            return model[len("openrouter/") :]
-        return model
-    # Non-OpenRouter endpoint: strip the provider prefix
-    # e.g. "minimax/minimax-M2.7" → "minimax-M2.7"
-    if "/" in model:
-        return model.split("/", 1)[1]
-    return model
+    profile = providers.resolve(base_url)
+    if profile.get("model_prefix") == "keep":
+        self_prefix = f"{profile['name']}/"
+        return model[len(self_prefix) :] if model.startswith(self_prefix) else model
+    return model.split("/", 1)[1] if "/" in model else model
 
 
 class LLMProvider:
-    """Direct OpenRouter API client for LLM completions."""
+    """OpenAI-compatible API client for LLM completions."""
 
     supports_json_mode: ClassVar[bool] = True
     supports_tool_calling: ClassVar[bool] = True
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
+        # Per-provider quirks (headers, model-prefix, reasoning remap), matched
+        # to the endpoint by base_url. Unknown endpoints get the portable default.
+        self.profile = providers.resolve(config.base_url)
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
         # Models that 400 on a forced tool_choice (deepseek thinking mode);
@@ -342,40 +340,35 @@ class LLMProvider:
         return f"{self.config.base_url.rstrip('/')}/chat/completions"
 
     def _build_headers(self) -> dict[str, str]:
-        """Build request headers. OpenRouter-specific ranking headers are
-        only attached when targeting OpenRouter; other endpoints get a clean
-        portable header set. Authorization is omitted entirely if the
-        endpoint needs no key (Ollama, llama.cpp, etc.)."""
+        """Build request headers: Content-Type, optional Bearer auth, and any
+        provider-specific extras from the profile (e.g. OpenRouter's ranking
+        headers). Authorization is omitted entirely if the endpoint needs no
+        key (Ollama, llama.cpp, etc.)."""
         if hasattr(self, "_cached_headers"):
             return dict(self._cached_headers)
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        key = _get_api_key(self.config)
+        key = _get_api_key(self.config, self.profile)
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        if _is_openrouter(self.config.base_url):
-            headers["HTTP-Referer"] = "https://github.com/miracodeai/mira"
-            headers["X-Title"] = "Mira Code Reviewer"
+        headers.update(self.profile.get("extra_headers", {}))
         self._cached_headers = headers
         return dict(headers)
 
     def _apply_reasoning(self, body: dict) -> None:
         """Enable extended thinking when a reasoning effort is configured.
 
-        OpenRouter exposes a unified ``reasoning.effort`` knob that it
-        normalizes across providers. Anthropic models reject a custom
-        ``temperature`` while thinking is on, so we drop it and let the
-        provider default it. No-op when reasoning is off, keeping the request
-        byte-for-byte identical to before.
+        The effort is passed via the unified ``reasoning.effort`` knob, after
+        any per-provider remap from the profile (e.g. OpenRouter wants
+        ``xhigh`` where DeepSeek's native top level is ``max``). Anthropic
+        models reject a custom ``temperature`` while thinking is on, so we drop
+        it. No-op when reasoning is off, keeping the request unchanged.
         """
         effort = self.config.reasoning_effort
         if not effort or effort == "off":
             return
         if body.get("model") in self._no_reasoning:
             return
-        # "max" is DeepSeek's native top level; OpenRouter rejects it and uses
-        # "xhigh" for the same thing, so translate when targeting OpenRouter.
-        if effort == "max" and _is_openrouter(self.config.base_url):
-            effort = "xhigh"
+        effort = self.profile.get("reasoning_effort_map", {}).get(effort, effort)
         body["reasoning"] = {"effort": effort}
         body.pop("temperature", None)
 

@@ -426,6 +426,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 if last_sha and last_sha != pr_info.head_sha:
                     incremental = await self.provider.get_compare_diff(
@@ -635,6 +636,7 @@ class ReviewEngine:
                     pr_info.owner,
                     pr_info.repo,
                     pr_info.number,
+                    platform=pr_info.platform,
                 )
                 prior_reviewed = set(prior.reviewed_paths) if prior else set()
                 prior_skipped = set(prior.skipped_paths) if prior else set()
@@ -649,7 +651,8 @@ class ReviewEngine:
                         reviewed_paths=sorted(new_reviewed),
                         skipped_paths=sorted(new_skipped),
                         chunk_index=(prior.chunk_index + 1) if prior else 1,
-                    )
+                    ),
+                    platform=pr_info.platform,
                 )
             except Exception as progress_err:
                 logger.debug("Failed to persist review progress: %s", progress_err)
@@ -667,6 +670,7 @@ class ReviewEngine:
                     pr_info.repo,
                     pr_info.number,
                     pr_info.head_sha,
+                    platform=pr_info.platform,
                 )
             except Exception as exc:
                 logger.debug("Failed to record last reviewed SHA: %s", exc)

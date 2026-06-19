@@ -50,7 +50,7 @@ def register_dashboard(app: FastAPI) -> None:
 
 # Standalone app — initialized at module load, but routes are registered at
 # the bottom of this file, *after* all @router decorators have run.
-app = FastAPI(title="Mira Dashboard API", version="0.4.0")
+app = FastAPI(title="Mira Dashboard API", version="0.5.0")
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
@@ -61,13 +61,19 @@ def _get_index_dir() -> str:
 
 @contextmanager
 def _open_store(owner: str, repo: str) -> Generator[IndexStore, None, None]:
-    """Open an IndexStore via the factory (Postgres or SQLite)."""
-    # Check the repos registry first — raises 404 if the repo isn't known
-    repo_record = _app_db.get_repo(owner, repo)
+    """Open an IndexStore via the factory (Postgres or SQLite).
+
+    The dashboard routes are keyed by (owner, repo) only, so resolve the
+    platform from the registry (github first, then gitlab) to open the right
+    per-platform store.
+    """
+    repo_record = _app_db.get_repo(owner, repo, platform="github") or _app_db.get_repo(
+        owner, repo, platform="gitlab"
+    )
     if repo_record is None:
         raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
 
-    store = IndexStore.open(owner, repo)
+    store = IndexStore.open(owner, repo, platform=repo_record.platform)
     try:
         yield store
     finally:
@@ -89,6 +95,7 @@ def _open_relationships() -> Generator[RelationshipStore, None, None]:
 class RepoListItem(BaseModel):
     owner: str
     repo: str
+    platform: str = "github"
     status: str = "pending"
     index_mode: str = "full"
     file_count: int = 0
@@ -298,6 +305,68 @@ def get_indexing_status() -> list[IndexStatusModel]:
     ]
 
 
+@router.post("/api/gitlab/sync")
+async def sync_gitlab_projects() -> dict:
+    """Discover every GitLab project the configured token can access and
+    register them (status pending), so they appear ready-to-index without
+    waiting for a webhook. Idempotent."""
+    token = os.environ.get("MIRA_GITLAB_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=400, detail="MIRA_GITLAB_TOKEN is not configured")
+    from mira.platforms.auth import GitLabTokenAuth
+    from mira.platforms.gitlab_webhook import backfill_gitlab_projects
+
+    base_url = os.environ.get("MIRA_GITLAB_API_URL", "https://gitlab.com/api/v4")
+    count = await backfill_gitlab_projects(GitLabTokenAuth(token, base_url))
+    return {"registered": count}
+
+
+class GitLabRepoRegister(BaseModel):
+    project: str  # "group/project" or "group/subgroup/project"
+
+
+@router.post("/api/gitlab/repos")
+async def register_gitlab_repo(body: GitLabRepoRegister) -> dict:
+    """Register a GitLab project and index it in the background.
+
+    GitLab has no installation webhook, so repos are added explicitly. The
+    access token comes from MIRA_GITLAB_TOKEN; add a project webhook pointing
+    at ``/gitlab/webhook`` to get auto-review on new MRs.
+    """
+    token = os.environ.get("MIRA_GITLAB_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=400, detail="MIRA_GITLAB_TOKEN is not configured")
+    owner, _, repo = body.project.strip("/").rpartition("/")
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="project must be 'group/project'")
+
+    _app_db.register_repo(owner, repo, platform="gitlab")
+    _app_db.set_repo_status(owner, repo, "indexing", platform="gitlab")
+
+    async def _index() -> None:
+        from mira.index.indexer import index_repo
+        from mira.index.store import IndexStore
+        from mira.platforms.fetch import EmptyRepoError, make_fetcher
+
+        try:
+            store = IndexStore.open(owner, repo, platform="gitlab")
+            count = await index_repo(
+                owner=owner, repo=repo, store=store, fetcher=make_fetcher("gitlab", token)
+            )
+            store.close()
+            _app_db.set_repo_status(
+                owner, repo, "ready", files_indexed=count, bump_last_indexed=True, platform="gitlab"
+            )
+        except EmptyRepoError as empty:
+            _app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform="gitlab")
+        except Exception as exc:
+            logger.exception("GitLab indexing failed for %s/%s", owner, repo)
+            _app_db.set_repo_status(owner, repo, "failed", error=str(exc), platform="gitlab")
+
+    asyncio.create_task(_index())
+    return {"status": "indexing", "owner": owner, "repo": repo, "platform": "gitlab"}
+
+
 @router.get("/api/repos", response_model=list[RepoListItem])
 def list_repos() -> list[RepoListItem]:
     """List all repos from the registry."""
@@ -306,6 +375,7 @@ def list_repos() -> list[RepoListItem]:
         RepoListItem(
             owner=r.owner,
             repo=r.repo,
+            platform=r.platform,
             status=r.status,
             index_mode=r.index_mode,
             file_count=r.files_indexed,
@@ -902,9 +972,10 @@ async def _run_initial_indexing(default_mode: str) -> None:
     if not to_index:
         return
 
-    # Get GitHub token
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if not token:
+    # Resolve a GitHub token once (used for github repos). GitLab repos use
+    # MIRA_GITLAB_TOKEN instead — each repo gets a fetcher for its platform.
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if not github_token and any(r.platform == "github" for r in to_index):
         try:
             from mira.github_app.auth import GitHubAppAuth
 
@@ -912,30 +983,39 @@ async def _run_initial_indexing(default_mode: str) -> None:
             private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
             if app_id and private_key:
                 auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
-                if to_index[0].installation_id:
-                    token = await auth.get_installation_token(to_index[0].installation_id)
+                gh = next((r for r in to_index if r.platform == "github"), None)
+                if gh and gh.installation_id:
+                    github_token = await auth.get_installation_token(gh.installation_id)
         except Exception as exc:
             logger.warning("Failed to get GitHub token for indexing: %s", exc)
-            return
+    gitlab_token = os.environ.get("MIRA_GITLAB_TOKEN", "")
 
     from mira.config import load_config
     from mira.dashboard.models_config import llm_config_for
     from mira.index.indexer import index_repo
     from mira.llm import create_llm
+    from mira.platforms.fetch import EmptyRepoError, make_fetcher
 
     config = load_config()
     llm = create_llm(llm_config_for("indexing", config.llm))
 
     for repo_record in to_index:
-        full_name = f"{repo_record.owner}/{repo_record.repo}"
+        owner, repo, platform = repo_record.owner, repo_record.repo, repo_record.platform
+        full_name = f"{owner}/{repo}"
+        token = gitlab_token if platform == "gitlab" else github_token
+        if not token:
+            # No usable token for this platform — leave it pending instead of
+            # crashing on an empty auth header.
+            logger.warning("Skipping initial index of %s — no %s token", full_name, platform)
+            continue
         try:
-            _app_db.set_repo_status(repo_record.owner, repo_record.repo, "indexing")
+            _app_db.set_repo_status(owner, repo, "indexing", platform=platform)
             tracker.start(full_name)
-            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            store = IndexStore.open(owner, repo, platform=platform)
             count = await index_repo(
-                owner=repo_record.owner,
-                repo=repo_record.repo,
-                token=token,
+                owner=owner,
+                repo=repo,
+                fetcher=make_fetcher(platform, token),
                 config=config,
                 store=store,
                 llm=llm,
@@ -943,19 +1023,23 @@ async def _run_initial_indexing(default_mode: str) -> None:
             )
             store.close()
             _app_db.set_repo_status(
-                repo_record.owner,
-                repo_record.repo,
+                owner,
+                repo,
                 "ready",
                 files_indexed=count,
                 bump_last_indexed=True,
+                platform=platform,
             )
             tracker.complete(full_name, count)
             logger.info("Indexed %s: %d files", full_name, count)
             from mira.outbound_webhooks import INDEXING_COMPLETED, dispatch_event
 
             await dispatch_event(INDEXING_COMPLETED, {"repo": full_name, "files_indexed": count})
+        except EmptyRepoError as empty:
+            _app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
+            tracker.complete(full_name, 0)
         except Exception as exc:
-            _app_db.set_repo_status(repo_record.owner, repo_record.repo, "failed", error=str(exc))
+            _app_db.set_repo_status(owner, repo, "failed", error=str(exc), platform=platform)
             tracker.fail(full_name, str(exc))
             logger.exception("Failed to index %s", full_name)
 
@@ -2031,32 +2115,47 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
         if j.repo == full_name:
             return {"status": "already_indexing"}
 
-    # Get GitHub token from app auth if available
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if not token:
-        try:
-            from mira.github_app.auth import GitHubAppAuth
+    # Resolve the repo's platform (github by default; gitlab if that's where
+    # it's registered) and build the matching fetcher.
+    record = _app_db.get_repo(owner, repo, platform="github") or _app_db.get_repo(
+        owner, repo, platform="gitlab"
+    )
+    platform = record.platform if record else "github"
 
-            app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
-            private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-            if app_id and private_key:
-                auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
-                installations = await auth.list_installations()
-                for inst in installations:
-                    inst_id = int(inst.get("id", 0))
-                    if inst_id:
-                        repos = await auth.list_installation_repos(inst_id)
-                        if any(r.get("full_name") == full_name for r in repos):
-                            token = await auth.get_installation_token(inst_id)
-                            break
-        except Exception as exc:
-            logger.warning("Failed to get GitHub token: %s", exc)
+    from mira.platforms.fetch import EmptyRepoError, make_fetcher
 
-    if not token:
-        raise HTTPException(
-            status_code=400,
-            detail="No GitHub token available. Set GITHUB_TOKEN or configure GitHub App.",
-        )
+    if platform == "gitlab":
+        token = os.environ.get("MIRA_GITLAB_TOKEN", "")
+        if not token:
+            raise HTTPException(status_code=400, detail="MIRA_GITLAB_TOKEN is not configured.")
+    else:
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if not token:
+            try:
+                from mira.github_app.auth import GitHubAppAuth
+
+                app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
+                private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
+                if app_id and private_key:
+                    auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
+                    installations = await auth.list_installations()
+                    for inst in installations:
+                        inst_id = int(inst.get("id", 0))
+                        if inst_id:
+                            repos = await auth.list_installation_repos(inst_id)
+                            if any(r.get("full_name") == full_name for r in repos):
+                                token = await auth.get_installation_token(inst_id)
+                                break
+            except Exception as exc:
+                logger.warning("Failed to get GitHub token: %s", exc)
+
+        if not token:
+            raise HTTPException(
+                status_code=400,
+                detail="No GitHub token available. Set GITHUB_TOKEN or configure GitHub App.",
+            )
+
+    fetcher = make_fetcher(platform, token)
 
     # Run indexing in background
     import asyncio
@@ -2077,7 +2176,7 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
             # silently fall back to the review model, which is slower and
             # more expensive per token.
             llm = create_llm(llm_config_for("indexing", config.llm))
-            store = IndexStore.open(owner, repo)
+            store = IndexStore.open(owner, repo, platform=platform)
             if full:
                 # Wipe existing index
                 for path in list(store.all_paths()):
@@ -2085,7 +2184,7 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
             count = await index_repo(
                 owner=owner,
                 repo=repo,
-                token=token,
+                fetcher=fetcher,
                 config=config,
                 store=store,
                 llm=llm,
@@ -2100,6 +2199,7 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
                 "ready",
                 files_indexed=count,
                 bump_last_indexed=True,
+                platform=platform,
             )
             tracker.complete(full_name, count)
             logger.info(
@@ -2113,6 +2213,10 @@ async def trigger_index(owner: str, repo: str, full: bool = False) -> dict:
             logger.info(
                 "Indexing cancelled for %s after %d files", full_name, cancelled.files_indexed
             )
+        except EmptyRepoError as empty:
+            _app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
+            tracker.complete(full_name, 0)
+            logger.info("Index skipped for %s — empty repository", full_name)
         except Exception as exc:
             tracker.fail(full_name, str(exc))
             logger.exception("Indexing failed for %s", full_name)

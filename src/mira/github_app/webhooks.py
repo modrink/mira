@@ -36,6 +36,7 @@ from mira.github_app.index_handlers import (
     handle_repos_added,
     handle_repos_removed,
 )
+from mira.platforms.mentions import command_after_mention, has_mention, mention_names
 
 logger = logging.getLogger(__name__)
 
@@ -53,22 +54,51 @@ def _verify_signature(payload_bytes: bytes, signature_header: str, secret: str) 
 
 
 def create_app(
-    app_auth: GitHubAppAuth,
-    webhook_secret: str,
-    bot_name: str,
+    app_auth: GitHubAppAuth | None = None,
+    webhook_secret: str | None = None,
+    bot_name: str = "miracodeai",
+    *,
+    gitlab_auth: Any = None,
+    gitlab_webhook_secret: str | None = None,
 ) -> FastAPI:
-    """Create and configure the FastAPI webhook application."""
+    """Create and configure the FastAPI webhook application.
+
+    GitHub (``app_auth`` + ``webhook_secret``) and GitLab (``gitlab_auth`` +
+    ``gitlab_webhook_secret``) routes are each registered only when their creds
+    are supplied, so a deployment can serve one platform or both.
+    """
     if not _SAFE_BOT_NAME.match(bot_name):
         raise ValueError(f"Invalid bot_name {bot_name!r}: must match [a-zA-Z0-9_-]+")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        backfill_task = asyncio.create_task(backfill_missing_indexes(app_auth))
-        backfill_task.add_done_callback(
-            lambda t: (
-                logger.warning("Backfill failed: %s", t.exception()) if t.exception() else None
-            )
+        # Backfill is a GitHub-installation concept; skip it on a GitLab-only
+        # deployment.
+        backfill_task = (
+            asyncio.create_task(backfill_missing_indexes(app_auth))
+            if app_auth is not None
+            else None
         )
+        if backfill_task is not None:
+            backfill_task.add_done_callback(
+                lambda t: (
+                    logger.warning("Backfill failed: %s", t.exception()) if t.exception() else None
+                )
+            )
+
+        # GitLab's equivalent: discover the projects the token can access and
+        # register them so they're in the dashboard ready to index up front.
+        if gitlab_auth is not None:
+            from mira.platforms.gitlab_webhook import backfill_gitlab_projects
+
+            gl_task = asyncio.create_task(backfill_gitlab_projects(gitlab_auth))
+            gl_task.add_done_callback(
+                lambda t: (
+                    logger.warning("GitLab discovery failed: %s", t.exception())
+                    if t.exception()
+                    else None
+                )
+            )
 
         from mira.security.poller import run_forever as run_vuln_poller
 
@@ -82,12 +112,12 @@ def create_app(
         )
 
         yield
-        if not backfill_task.done():
+        if backfill_task is not None and not backfill_task.done():
             backfill_task.cancel()
         if not vuln_task.done():
             vuln_task.cancel()
 
-    app = FastAPI(title="Mira GitHub App", lifespan=lifespan)
+    app = FastAPI(title="Mira", lifespan=lifespan)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -97,6 +127,8 @@ def create_app(
     @app.post("/github/webhook")
     @app.post("/webhook")
     async def webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+        if app_auth is None or webhook_secret is None:
+            raise HTTPException(status_code=404)
         payload_bytes = await request.body()
         signature = request.headers.get("X-Hub-Signature-256", "")
 
@@ -140,8 +172,11 @@ def create_app(
                     media_type="application/json",
                 )
 
+            names = mention_names(bot_name, await app_auth.get_bot_identity())
             pr_body: str = payload.get("pull_request", {}).get("body", "") or ""
-            if re.search(rf"@{re.escape(bot_name)}[ \t]+ignore\b", pr_body, re.IGNORECASE):
+            if any(
+                re.search(rf"@{re.escape(n)}[ \t]+ignore\b", pr_body, re.IGNORECASE) for n in names
+            ):
                 logger.info("PR ignored via @%s ignore in description", bot_name)
                 return Response(
                     content='{"status": "ignored"}',
@@ -179,11 +214,9 @@ def create_app(
                     media_type="application/json",
                 )
 
-            if is_pr and f"@{bot_name}" in comment_body:
-                cmd_match = re.search(
-                    rf"@{re.escape(bot_name)}\s+(\w+)", comment_body, re.IGNORECASE
-                )
-                cmd_word = cmd_match.group(1).lower() if cmd_match else ""
+            names = mention_names(bot_name, await app_auth.get_bot_identity())
+            if is_pr and has_mention(comment_body, names):
+                cmd_word = command_after_mention(comment_body, names)
 
                 if cmd_word in _PAUSE_KEYWORDS | _RESUME_KEYWORDS:
                     background_tasks.add_task(
@@ -219,7 +252,8 @@ def create_app(
                     media_type="application/json",
                 )
 
-            if f"@{bot_name}" in rc_body:
+            names = mention_names(bot_name, await app_auth.get_bot_identity())
+            if has_mention(rc_body, names):
                 background_tasks.add_task(handle_thread_reject, payload, app_auth, bot_name)
                 return Response(
                     content='{"status": "processing"}',
@@ -275,6 +309,29 @@ def create_app(
             status_code=200,
             media_type="application/json",
         )
+
+    if gitlab_auth is not None and gitlab_webhook_secret is not None:
+        from mira.platforms.gitlab_webhook import dispatch_gitlab_event, verify_gitlab_token
+
+        @app.post("/gitlab/webhook")
+        async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+            token = request.headers.get("X-Gitlab-Token", "")
+            if not verify_gitlab_token(token, gitlab_webhook_secret):
+                return Response(
+                    content='{"error": "invalid token"}',
+                    status_code=401,
+                    media_type="application/json",
+                )
+            event = request.headers.get("X-Gitlab-Event", "")
+            payload: dict[str, Any] = await request.json()
+            status = await dispatch_gitlab_event(
+                event, payload, gitlab_auth, bot_name, background_tasks
+            )
+            return Response(
+                content=f'{{"status": "{status}"}}',
+                status_code=200,
+                media_type="application/json",
+            )
 
     from mira.dashboard.api import register_dashboard
 

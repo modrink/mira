@@ -50,6 +50,7 @@ def _make_comment_payload(body: str) -> dict[str, Any]:
 def mock_app_auth() -> AsyncMock:
     auth = AsyncMock()
     auth.get_installation_token = AsyncMock(return_value="ghs_test_token")
+    auth.get_bot_identity = AsyncMock(return_value="mira-bot")
     return auth
 
 

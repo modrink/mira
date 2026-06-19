@@ -46,6 +46,16 @@ class TestParseBotCommentMetadata:
         assert meta["severity"] == "warning"
         assert meta["title"] == "Raw SQL query"
 
+    def test_no_category_emoji(self):
+        # Current format drops the leading category emoji.
+        body = (
+            "**Security issue**  \n🛑 Blocker — must fix before merge\n\n**Raw SQL query**\n\nbody"
+        )
+        meta = parse_bot_comment_metadata(body)
+        assert meta["category"] == "security"
+        assert meta["severity"] == "blocker"
+        assert meta["title"] == "Raw SQL query"
+
     def test_missing_severity_still_extracts_category_and_title(self):
         body = "⚡ **Performance**\n\n**Slow loop**\n\nbody"
         meta = parse_bot_comment_metadata(body)
@@ -414,7 +424,9 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
         actor="alice",
     )
 
-    monkeypatch.setattr(handlers, "_open_store", lambda owner, repo: _StoreProxy(store))
+    monkeypatch.setattr(
+        handlers, "_open_store", lambda owner, repo, platform="github": _StoreProxy(store)
+    )
 
     mock_provider = MagicMock()
     mock_provider.get_all_bot_threads = AsyncMock(

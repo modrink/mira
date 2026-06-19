@@ -71,12 +71,20 @@ def estimate_indexing_cost(file_count: int, model: str) -> dict:
 
 
 def get_indexing_model(config: LLMConfig, db_value: str | None = None) -> str:
-    """Resolve the indexing model: DB → config.indexing_model → config.model."""
+    """Resolve the indexing model: DB → config.indexing_model → config.model.
+
+    When falling all the way back to ``config.model`` and that model isn't a
+    valid *indexing* model (e.g. the default review-tier Sonnet), use the
+    recommended indexing model instead — otherwise the dashboard dropdown has
+    no matching option to pre-select and shows a blank default.
+    """
     if db_value:
         return db_value
     if config.indexing_model:
         return config.indexing_model
-    return config.model
+    if registry.is_supported(config.model, purpose="indexing"):
+        return config.model
+    return registry.default_for_purpose("indexing") or config.model
 
 
 def get_review_model(config: LLMConfig, db_value: str | None = None) -> str:
@@ -85,7 +93,9 @@ def get_review_model(config: LLMConfig, db_value: str | None = None) -> str:
         return db_value
     if config.review_model:
         return config.review_model
-    return config.model
+    if registry.is_supported(config.model, purpose="review"):
+        return config.model
+    return registry.default_for_purpose("review") or config.model
 
 
 def get_review_thinking_mode(config: LLMConfig, db_value: str | None = None) -> str | None:

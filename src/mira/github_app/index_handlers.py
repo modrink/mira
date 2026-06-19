@@ -8,9 +8,10 @@ from typing import Any
 
 from mira.config import load_config
 from mira.github_app.auth import GitHubAppAuth
-from mira.index.indexer import _fetch_repo_tree, _should_index, index_diff, index_repo
+from mira.index.indexer import _should_index, index_diff, index_repo
 from mira.index.store import IndexStore
 from mira.llm import create_llm
+from mira.platforms.fetch import make_fetcher
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +43,14 @@ async def _count_files_for_repos(
 
     app_db = _get_app_db()
     exclude_patterns = load_config().filter.exclude_patterns
+    fetcher = make_fetcher("github", token)
     for repo_info in repos:
         full_name = repo_info.get("full_name", "")
         if "/" not in full_name:
             continue
         owner, repo = full_name.split("/", 1)
         try:
-            tree_paths = await _fetch_repo_tree(owner, repo, token)
+            tree_paths = await fetcher.repo_tree(owner, repo, "main")
             indexable = [p for p in tree_paths if _should_index(p, exclude_patterns)]
             app_db.set_repo_file_count(owner, repo, len(indexable))
             logger.info("Counted %d indexable files in %s", len(indexable), full_name)
@@ -246,65 +248,86 @@ async def handle_push_index(
             logger.debug("Push to %s/%s had no file changes", owner, repo_name)
             return
 
-        config = load_config()
-
-        # Use the configured indexing model (not the default review model)
-        from mira.dashboard.models_config import llm_config_for
-
-        llm = create_llm(llm_config_for("indexing", config.llm))
-        store = IndexStore.open(owner, repo_name)
-
-        # If too many files changed (large rebase/squash), do a full re-index
-        total_affected = len(changed_paths) + len(removed_paths)
-        if total_affected > _INCREMENTAL_FILE_CAP:
-            logger.info(
-                "Push to %s/%s touched %d files (cap=%d), running full re-index",
-                owner,
-                repo_name,
-                total_affected,
-                _INCREMENTAL_FILE_CAP,
-            )
-            count = await index_repo(
-                owner=owner,
-                repo=repo_name,
-                token=token,
-                config=config,
-                store=store,
-                llm=llm,
-                branch=default_branch,
-            )
-        else:
-            count = await index_diff(
-                owner=owner,
-                repo=repo_name,
-                token=token,
-                config=config,
-                store=store,
-                llm=llm,
-                changed_paths=list(changed_paths),
-                removed_paths=list(removed_paths),
-                branch=default_branch,
-            )
-
-        store.close()
-
-        # Bump last_indexed_at on a real incremental indexing run.
-        if count > 0:
-            try:
-                app_db.set_repo_status(
-                    owner,
-                    repo_name,
-                    "ready",
-                    files_indexed=count,
-                    bump_last_indexed=True,
-                )
-            except Exception as exc:
-                logger.warning("Failed to update repo status after push: %s", exc)
-
-        logger.info("Incremental index for %s/%s: %d files", owner, repo_name, count)
-
+        await run_incremental_index(
+            owner,
+            repo_name,
+            make_fetcher("github", token),
+            list(changed_paths),
+            list(removed_paths),
+            default_branch,
+        )
     except Exception:
         logger.exception("Error handling push indexing")
+
+
+async def run_incremental_index(
+    owner: str,
+    repo: str,
+    fetcher: Any,
+    changed_paths: list[str],
+    removed_paths: list[str],
+    default_branch: str,
+    platform: str = "github",
+) -> None:
+    """Platform-neutral push-indexing core, shared by GitHub and GitLab.
+
+    Re-indexes changed files (or a full re-index past the file cap) using the
+    given ``RepoFetcher`` and bumps the repo's last-indexed timestamp.
+    """
+    app_db = _get_app_db()
+    config = load_config()
+    from mira.dashboard.models_config import llm_config_for
+
+    llm = create_llm(llm_config_for("indexing", config.llm))
+    store = IndexStore.open(owner, repo, platform=platform)
+
+    total_affected = len(changed_paths) + len(removed_paths)
+    if total_affected > _INCREMENTAL_FILE_CAP:
+        logger.info(
+            "Push to %s/%s touched %d files (cap=%d), running full re-index",
+            owner,
+            repo,
+            total_affected,
+            _INCREMENTAL_FILE_CAP,
+        )
+        count = await index_repo(
+            owner=owner,
+            repo=repo,
+            config=config,
+            store=store,
+            llm=llm,
+            branch=default_branch,
+            fetcher=fetcher,
+        )
+    else:
+        count = await index_diff(
+            owner=owner,
+            repo=repo,
+            config=config,
+            store=store,
+            llm=llm,
+            changed_paths=changed_paths,
+            removed_paths=removed_paths,
+            branch=default_branch,
+            fetcher=fetcher,
+        )
+
+    store.close()
+
+    if count > 0:
+        try:
+            app_db.set_repo_status(
+                owner,
+                repo,
+                "ready",
+                files_indexed=count,
+                bump_last_indexed=True,
+                platform=platform,
+            )
+        except Exception as exc:
+            logger.warning("Failed to update repo status after push: %s", exc)
+
+    logger.info("Incremental index for %s/%s: %d files", owner, repo, count)
 
 
 def _index_is_populated(owner: str, repo: str) -> bool:

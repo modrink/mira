@@ -21,6 +21,7 @@ from mira.llm.provider import (
 )
 from mira.llm.response_parser import (
     convert_to_review_comments,
+    loads_lenient,
     parse_llm_response,
 )
 from mira.models import KeyIssue, ReviewComment, Severity
@@ -314,7 +315,9 @@ async def self_critique(
             tools=[SUBMIT_CRITIQUE_TOOL],
             temperature=0.0,
         )
-        data = _json.loads(raw) if raw else {}
+        data = loads_lenient(raw) if raw else {}
+        if data is None:
+            data = {}
     except Exception as exc:
         logger.warning("Self-critique LLM call failed: %s. Keeping all drafts.", exc)
         return comments
