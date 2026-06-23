@@ -51,6 +51,9 @@ const LIVE_INTERVAL_SECS = 10
 // Subtle inset ring shared by every pill on the page.
 const PILL_RING = "ring-1 ring-inset ring-foreground/10"
 
+// Blue highlight applied to a filter control when it's narrowing results.
+const ACTIVE_FILTER = "border-blue-500 ring-1 ring-blue-500/30"
+
 // Per-severity color treatment (semantic, not the near-black primary).
 const SEVERITY_PILL: Record<string, string> = {
   blocker:
@@ -439,11 +442,11 @@ export function ActivityPage() {
             placeholder="Search by PR title, number, repo, or category…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="pl-8"
+            className={cn("pl-8", search && ACTIVE_FILTER)}
           />
         </div>
         <Select value={windowSel} onValueChange={setWindowSel}>
-          <SelectTrigger className="lg:w-44">
+          <SelectTrigger className={cn("lg:w-44", windowSel !== "any" && ACTIVE_FILTER)}>
             <SelectValue placeholder="Any time" />
           </SelectTrigger>
           <SelectContent>
@@ -455,7 +458,7 @@ export function ActivityPage() {
           </SelectContent>
         </Select>
         <Select value={repo} onValueChange={setRepo}>
-          <SelectTrigger className="lg:w-56">
+          <SelectTrigger className={cn("lg:w-56", repo !== ALL_REPOS && ACTIVE_FILTER)}>
             <SelectValue placeholder="All repos" />
           </SelectTrigger>
           <SelectContent>
@@ -520,9 +523,9 @@ export function ActivityPage() {
           </div>
         ) : (
           <>
-            <div className="themed-scrollbar min-h-0 flex-1 overflow-y-auto">
-              <Table>
-                <TableHeader className="sticky top-0 z-10 bg-background">
+            <div className="themed-scrollbar min-h-0 flex-1 overflow-auto">
+              <Table containerClassName="overflow-x-visible overflow-y-visible">
+                <TableHeader className="sticky top-0 z-10 bg-background shadow-[0_1px_0_0_var(--border)]">
                   <TableRow>
                     <SortHead label="Repo" sortKey="repo" sort={sort} onSort={toggleSort} />
                     <SortHead label="PR" sortKey="pr_number" sort={sort} onSort={toggleSort} />
