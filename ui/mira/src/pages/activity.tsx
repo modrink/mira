@@ -95,6 +95,9 @@ type PRGroup = {
   lastReviewedAt: number
   categories: string // union across passes
   totalComments: number // summed across passes
+  totalBlockers: number
+  totalWarnings: number
+  totalSuggestions: number
   totalTokens: number
   totalDurationMs: number
 }
@@ -113,11 +116,17 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
     const latest = reviews[0]
     const cats = new Set<string>()
     let totalComments = 0
+    let totalBlockers = 0
+    let totalWarnings = 0
+    let totalSuggestions = 0
     let totalTokens = 0
     let totalDurationMs = 0
     for (const r of reviews) {
       splitCategories(r.categories).forEach((c) => cats.add(c))
       totalComments += r.comments_posted
+      totalBlockers += r.blockers
+      totalWarnings += r.warnings
+      totalSuggestions += r.suggestions
       totalTokens += r.tokens_used
       totalDurationMs += r.duration_ms
     }
@@ -135,6 +144,9 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
       lastReviewedAt: latest.created_at,
       categories: Array.from(cats).sort().join(", "),
       totalComments,
+      totalBlockers,
+      totalWarnings,
+      totalSuggestions,
       totalTokens,
       totalDurationMs,
     })
@@ -212,11 +224,15 @@ function splitCategories(categories: string): string[] {
     .filter(Boolean)
 }
 
-function SeverityBadges({ event }: { event: ActivityEventModel }) {
+function SeverityBadges({
+  counts,
+}: {
+  counts: { blockers: number; warnings: number; suggestions: number }
+}) {
   const parts: { label: string; kind: keyof typeof SEVERITY_PILL }[] = []
-  if (event.blockers > 0) parts.push({ label: plural(event.blockers, "blocker"), kind: "blocker" })
-  if (event.warnings > 0) parts.push({ label: plural(event.warnings, "warning"), kind: "warning" })
-  if (event.suggestions > 0) parts.push({ label: plural(event.suggestions, "suggestion"), kind: "suggestion" })
+  if (counts.blockers > 0) parts.push({ label: plural(counts.blockers, "blocker"), kind: "blocker" })
+  if (counts.warnings > 0) parts.push({ label: plural(counts.warnings, "warning"), kind: "warning" })
+  if (counts.suggestions > 0) parts.push({ label: plural(counts.suggestions, "suggestion"), kind: "suggestion" })
   if (parts.length === 0) return <span className="text-muted-foreground">—</span>
   return (
     <div className="flex flex-wrap gap-1">
@@ -547,7 +563,7 @@ export function ActivityPage() {
                         {g.latest.comments_posted}
                       </TableCell>
                       <TableCell>
-                        <SeverityBadges event={g.latest} />
+                        <SeverityBadges counts={g.latest} />
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-wrap gap-1">
@@ -664,12 +680,18 @@ export function ActivityPage() {
             </div>
 
             <div className="flex-1 space-y-6 overflow-y-auto p-6">
-              {/* Summary — current state + cumulative totals */}
+              {/* Summary — findings + totals across all review passes */}
               <div>
                 <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">
-                  Latest findings
+                  Findings
                 </h3>
-                <SeverityBadges event={selected.latest} />
+                <SeverityBadges
+                  counts={{
+                    blockers: selected.totalBlockers,
+                    warnings: selected.totalWarnings,
+                    suggestions: selected.totalSuggestions,
+                  }}
+                />
               </div>
 
               <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
@@ -739,7 +761,7 @@ function ReviewTimeline({ reviews }: { reviews: ActivityEventModel[] }) {
               </div>
 
               <div className="mt-2">
-                <SeverityBadges event={r} />
+                <SeverityBadges counts={r} />
               </div>
 
               {splitCategories(r.categories).length > 0 && (
