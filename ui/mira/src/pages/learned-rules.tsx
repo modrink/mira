@@ -11,7 +11,6 @@ import {
   Plus,
   Power,
   Search,
-  Trash2,
   X,
 } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
@@ -92,6 +91,9 @@ export function LearnedRulesPage() {
   const [tab, setTab] = useState<"approved" | "pending">("approved")
   const [query, setQuery] = useState("")
   const [repoFilter, setRepoFilter] = useState(ALL_REPOS)
+  const [enabledFilter, setEnabledFilter] = useState<"all" | "enabled" | "disabled">(
+    "all",
+  )
   const [editing, setEditing] = useState<OrgLearnedRuleModel | null>(null)
   const [creating, setCreating] = useState(false)
   const [selected, setSelected] = useState<OrgLearnedRuleModel | null>(null)
@@ -139,6 +141,10 @@ export function LearnedRulesPage() {
     return list.filter((r) => {
       const slug = `${r.owner}/${r.repo}`
       if (repoFilter !== ALL_REPOS && slug !== repoFilter) return false
+      if (enabledFilter !== "all" && r.status === "approved") {
+        if (enabledFilter === "enabled" && !r.active) return false
+        if (enabledFilter === "disabled" && r.active) return false
+      }
       if (!q) return true
       return `${r.rule_text} ${r.category} ${r.path_pattern} ${slug}`
         .toLowerCase()
@@ -164,11 +170,8 @@ export function LearnedRulesPage() {
     act(() => api.setLearnedRuleActive(selected.owner, selected.repo, selected.id, active))
     setSelected({ ...selected, active })
   }
-  const deleteSel = () => {
-    if (!selected) return
-    act(() => api.deleteLearnedRule(selected.owner, selected.repo, selected.id))
-    closeDetail()
-  }
+  // Enabled/disabled only applies to approved rules, so only offer it there.
+  const showEnabledFilter = !isAdmin || tab === "approved"
 
   const filters = (
     <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -181,6 +184,21 @@ export function LearnedRulesPage() {
           className={cn("pl-8", query && ACTIVE_FILTER)}
         />
       </div>
+      {showEnabledFilter && (
+        <Select
+          value={enabledFilter}
+          onValueChange={(v) => setEnabledFilter(v as "all" | "enabled" | "disabled")}
+        >
+          <SelectTrigger className={cn("sm:w-40", enabledFilter !== "all" && ACTIVE_FILTER)}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All statuses</SelectItem>
+            <SelectItem value="enabled">Enabled</SelectItem>
+            <SelectItem value="disabled">Disabled</SelectItem>
+          </SelectContent>
+        </Select>
+      )}
       <Select value={repoFilter} onValueChange={setRepoFilter}>
         <SelectTrigger className={cn("sm:w-64", repoFilter !== ALL_REPOS && ACTIVE_FILTER)}>
           <SelectValue placeholder="All repos" />
@@ -226,7 +244,7 @@ export function LearnedRulesPage() {
             rows={applyFilter(approved)}
             onSelect={openDetail}
             selectedKey={panelOpen ? selectedKey : null}
-            resetKey={`${query}|${repoFilter}`}
+            resetKey={`${query}|${repoFilter}|${enabledFilter}`}
           />
         </div>
       ) : (
@@ -269,7 +287,7 @@ export function LearnedRulesPage() {
               rows={applyFilter(approved)}
               onSelect={openDetail}
               selectedKey={panelOpen ? selectedKey : null}
-              resetKey={`approved|${query}|${repoFilter}`}
+              resetKey={`approved|${query}|${repoFilter}|${enabledFilter}`}
             />
           </TabsContent>
 
@@ -278,7 +296,7 @@ export function LearnedRulesPage() {
               rows={applyFilter(pending)}
               onSelect={openDetail}
               selectedKey={panelOpen ? selectedKey : null}
-              resetKey={`pending|${query}|${repoFilter}`}
+              resetKey={`pending|${query}|${repoFilter}|${enabledFilter}`}
             />
           </TabsContent>
         </Tabs>
@@ -339,16 +357,6 @@ export function LearnedRulesPage() {
                 <Button variant="outline" onClick={() => setEditing(selected)}>
                   <Pencil className="mr-1 h-4 w-4" /> Edit
                 </Button>
-                <ConfirmButton
-                  variant="destructive"
-                  destructive
-                  dialogTitle="Delete learning?"
-                  dialogDescription="This permanently removes the rule. This cannot be undone."
-                  confirmLabel="Delete"
-                  onConfirm={deleteSel}
-                >
-                  <Trash2 className="mr-1 h-4 w-4" /> Delete
-                </ConfirmButton>
               </div>
             )}
 
