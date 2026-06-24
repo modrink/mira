@@ -341,6 +341,7 @@ export function LearnedRulesPage() {
                     <ConfirmButton
                       variant="destructive"
                       destructive
+                      className="ring-1 ring-inset ring-destructive/30"
                       dialogTitle="Disable learning?"
                       dialogDescription="It will stop influencing reviews until you re-enable it."
                       confirmLabel="Disable"
