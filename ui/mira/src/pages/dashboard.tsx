@@ -1,3 +1,4 @@
+import { Brain } from "lucide-react"
 import { useEffect, useState } from "react"
 import {
   Area,
@@ -42,6 +43,11 @@ export function DashboardPage() {
   // missing endpoint or transient failure just hides the card.
   const { data: vulnSummary } = useAsync(
     () => api.getVulnerabilitiesSummary().catch(() => null),
+    [],
+  )
+  // Pending learnings awaiting admin approval — surfaced as a nudge.
+  const { data: pendingLearnings } = useAsync(
+    () => api.listLearnedRules("pending").catch(() => []),
     [],
   )
 
@@ -231,6 +237,11 @@ export function DashboardPage() {
       {/* Security alerts — populated by the OSV poller. */}
       {vulnSummary && (
         <SecurityAlertsCard summary={vulnSummary} />
+      )}
+
+      {/* Nudge to review learnings waiting on admin approval. */}
+      {pendingLearnings && pendingLearnings.length > 0 && (
+        <PendingLearningsCard count={pendingLearnings.length} />
       )}
 
       {/* Period selector */}
@@ -556,6 +567,32 @@ function CategoryBarChart({ categories }: { categories: Record<string, number> }
         <Bar dataKey="count" fill="var(--color-count)" radius={4} />
       </BarChart>
     </ChartContainer>
+  )
+}
+
+function PendingLearningsCard({ count }: { count: number }) {
+  return (
+    <Card>
+      <CardContent className="flex items-center gap-3 py-4">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-amber-600 ring-1 ring-amber-500/30 dark:text-amber-400">
+          <Brain className="h-4 w-4" />
+        </span>
+        <div className="min-w-0">
+          <div className="text-sm font-medium">
+            {count} learning{count !== 1 ? "s" : ""} awaiting approval
+          </div>
+          <div className="text-xs text-muted-foreground">
+            Review and approve before they affect reviews.
+          </div>
+        </div>
+        <a
+          href="/learnings"
+          className="ml-auto shrink-0 text-xs font-medium text-muted-foreground underline-offset-2 hover:underline"
+        >
+          Review →
+        </a>
+      </CardContent>
+    </Card>
   )
 }
 
