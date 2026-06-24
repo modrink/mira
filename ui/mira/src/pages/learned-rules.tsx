@@ -307,6 +307,51 @@ export function LearnedRulesPage() {
               </Button>
             </div>
 
+            {isAdmin && (
+              <div className="flex flex-wrap gap-2 border-b bg-muted/30 p-4">
+                {selected.status === "pending" ? (
+                  <>
+                    <Button onClick={approveSel}>
+                      <Check className="mr-1 h-4 w-4" /> Approve
+                    </Button>
+                    <Button variant="outline" onClick={rejectSel}>
+                      <X className="mr-1 h-4 w-4" /> Reject
+                    </Button>
+                  </>
+                ) : selected.status === "approved" ? (
+                  selected.active ? (
+                    <ConfirmButton
+                      variant="destructive"
+                      destructive
+                      dialogTitle="Disable learning?"
+                      dialogDescription="It will stop influencing reviews until you re-enable it."
+                      confirmLabel="Disable"
+                      onConfirm={() => toggleSel(false)}
+                    >
+                      <Power className="mr-1 h-4 w-4" /> Disable
+                    </ConfirmButton>
+                  ) : (
+                    <Button onClick={() => toggleSel(true)}>
+                      <Power className="mr-1 h-4 w-4" /> Enable
+                    </Button>
+                  )
+                ) : null}
+                <Button variant="outline" onClick={() => setEditing(selected)}>
+                  <Pencil className="mr-1 h-4 w-4" /> Edit
+                </Button>
+                <ConfirmButton
+                  variant="destructive"
+                  destructive
+                  dialogTitle="Delete learning?"
+                  dialogDescription="This permanently removes the rule. This cannot be undone."
+                  confirmLabel="Delete"
+                  onConfirm={deleteSel}
+                >
+                  <Trash2 className="mr-1 h-4 w-4" /> Delete
+                </ConfirmButton>
+              </div>
+            )}
+
             <div className="flex-1 space-y-6 overflow-y-auto p-6">
               <div>
                 <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">
@@ -326,57 +371,6 @@ export function LearnedRulesPage() {
               </dl>
             </div>
 
-            {isAdmin && (
-              <div className="space-y-2 border-t p-6">
-                {selected.status === "pending" ? (
-                  <div className="flex gap-2">
-                    <Button className="flex-1" onClick={approveSel}>
-                      <Check className="mr-1 h-4 w-4" /> Approve
-                    </Button>
-                    <Button variant="outline" className="flex-1" onClick={rejectSel}>
-                      <X className="mr-1 h-4 w-4" /> Reject
-                    </Button>
-                  </div>
-                ) : selected.status === "approved" ? (
-                  selected.active ? (
-                    <ConfirmButton
-                      variant="outline"
-                      className="w-full"
-                      dialogTitle="Disable learning?"
-                      dialogDescription="It will stop influencing reviews until you re-enable it."
-                      confirmLabel="Disable"
-                      onConfirm={() => toggleSel(false)}
-                    >
-                      <Power className="mr-1 h-4 w-4" /> Disable
-                    </ConfirmButton>
-                  ) : (
-                    <Button variant="outline" className="w-full" onClick={() => toggleSel(true)}>
-                      <Power className="mr-1 h-4 w-4" /> Enable
-                    </Button>
-                  )
-                ) : null}
-                <div className="flex gap-2">
-                  <Button
-                    variant="ghost"
-                    className="flex-1"
-                    onClick={() => setEditing(selected)}
-                  >
-                    <Pencil className="mr-1 h-4 w-4" /> Edit
-                  </Button>
-                  <ConfirmButton
-                    variant="ghost"
-                    className="flex-1"
-                    destructive
-                    dialogTitle="Delete learning?"
-                    dialogDescription="This permanently removes the rule. This cannot be undone."
-                    confirmLabel="Delete"
-                    onConfirm={deleteSel}
-                  >
-                    <Trash2 className="mr-1 h-4 w-4" /> Delete
-                  </ConfirmButton>
-                </div>
-              </div>
-            )}
           </>
         )}
       </div>
