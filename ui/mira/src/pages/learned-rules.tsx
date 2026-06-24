@@ -121,13 +121,18 @@ export function LearnedRulesPage() {
   const { user } = useAuth()
   const isAdmin = !!user?.is_admin
   const navigate = useNavigate()
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
 
   const [refreshKey, setRefreshKey] = useState(0)
   const refresh = () => setRefreshKey((k) => k + 1)
-  const [tab, setTab] = useState<"approved" | "pending">(
-    params.get("tab") === "pending" ? "pending" : "approved",
-  )
+  // Tab lives in the URL (?tab=) so the browser back button moves between tabs.
+  const tab: "approved" | "pending" =
+    params.get("tab") === "pending" ? "pending" : "approved"
+  const setTab = (t: "approved" | "pending") => {
+    const next = new URLSearchParams(params)
+    next.set("tab", t)
+    setParams(next)
+  }
   const [query, setQuery] = useState("")
   const [repoFilter, setRepoFilter] = useState(ALL_REPOS)
   const [enabledFilter, setEnabledFilter] = useState<"all" | "enabled" | "disabled">(
