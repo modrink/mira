@@ -283,8 +283,9 @@ export function LearnedRulesPage() {
   const selectedKey = selected ? ruleKey(selected) : null
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex items-start justify-between gap-4">
+    // Full-height: only the table body scrolls, not the whole page.
+    <div className="flex h-[calc(100svh-3rem)] flex-col gap-4 overflow-hidden p-6">
+      <div className="flex shrink-0 items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Learnings</h1>
           <p className="text-sm text-muted-foreground">
@@ -302,8 +303,12 @@ export function LearnedRulesPage() {
       {firstLoad ? (
         <div className="text-sm text-muted-foreground">Loading…</div>
       ) : (
-        <Tabs value={tab} onValueChange={(v) => setTab(v as "approved" | "pending")}>
-          <TabsList>
+        <Tabs
+          value={tab}
+          onValueChange={(v) => setTab(v as "approved" | "pending")}
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          <TabsList className="shrink-0">
             <TabsTrigger value="approved">
               Approved
               <Badge variant="secondary" className="ml-2 tabular-nums">
@@ -321,9 +326,12 @@ export function LearnedRulesPage() {
             </TabsTrigger>
           </TabsList>
 
-          <div className="mt-4">{filters}</div>
+          <div className="mt-4 shrink-0">{filters}</div>
 
-          <TabsContent value="approved" className="mt-3 space-y-2">
+          <TabsContent
+            value="approved"
+            className="mt-3 flex min-h-0 flex-1 flex-col gap-2"
+          >
             {isAdmin && pending.length > 0 && (
               <button
                 onClick={() => setTab("pending")}
@@ -345,7 +353,10 @@ export function LearnedRulesPage() {
             />
           </TabsContent>
 
-          <TabsContent value="pending" className="mt-3 space-y-2">
+          <TabsContent
+            value="pending"
+            className="mt-3 flex min-h-0 flex-1 flex-col gap-2"
+          >
             {!isAdmin && (
               <div className="flex items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground">
                 <Lock className="h-3 w-3 shrink-0" />
@@ -523,8 +534,8 @@ function LearningsTable({
 
   if (rows.length === 0) {
     return (
-      <Card>
-        <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
+      <Card className="flex min-h-0 flex-1 flex-col">
+        <CardContent className="flex flex-1 flex-col items-center justify-center gap-2 py-12 text-center">
           <Brain className="h-8 w-8 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">No learnings here.</p>
         </CardContent>
@@ -533,10 +544,11 @@ function LearningsTable({
   }
 
   return (
-    <Card className="overflow-hidden py-0">
-      <Table>
-        <TableHeader>
-          <TableRow>
+    <Card className="flex min-h-0 flex-1 flex-col overflow-hidden py-0">
+      <div className="themed-scrollbar min-h-0 flex-1 overflow-auto">
+        <Table containerClassName="overflow-x-visible overflow-y-visible">
+          <TableHeader className="sticky top-0 z-10 bg-background shadow-[0_1px_0_0_var(--border)]">
+            <TableRow>
             <SortHead label="Repo" sortKey="repo" sort={sort} onSort={toggleSort} className="w-56" />
             <SortHead label="Learning" sortKey="learning" sort={sort} onSort={toggleSort} />
             <SortHead label="Status" sortKey="status" sort={sort} onSort={toggleSort} className="w-28" />
@@ -586,10 +598,11 @@ function LearningsTable({
               </TableRow>
             )
           })}
-        </TableBody>
-      </Table>
+          </TableBody>
+        </Table>
+      </div>
 
-      <div className="flex items-center justify-between gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
         <div className="flex items-center gap-3">
           <span>
             {rangeStart}–{rangeEnd} of {sorted.length}
