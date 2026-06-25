@@ -574,7 +574,10 @@ function LearningsTable({
   return (
     <Card className="flex min-h-0 flex-1 flex-col overflow-hidden py-0">
       <div className="themed-scrollbar min-h-0 flex-1 overflow-auto">
-        <Table containerClassName="overflow-x-visible overflow-y-visible">
+        <Table
+          className="table-fixed"
+          containerClassName="overflow-x-visible overflow-y-visible"
+        >
           <TableHeader className="sticky top-0 z-10 bg-background shadow-[0_1px_0_0_var(--border)]">
             <TableRow>
             <SortHead label="Repo" sortKey="repo" sort={sort} onSort={toggleSort} className="w-56" />
@@ -601,19 +604,22 @@ function LearningsTable({
                   </span>
                 </TableCell>
                 <TableCell className="align-top">
-                  <div className="max-w-[460px]">
-                    <div
-                      className={cn("line-clamp-2 text-sm", disabled && "opacity-50")}
-                    >
-                      {r.rule_text}
-                    </div>
-                    {(r.category || r.path_pattern) && (
-                      <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {r.category}
-                        {r.path_pattern ? ` · ${r.path_pattern}` : ""}
-                      </div>
+                  {/* table-fixed gives this column the leftover width; the text
+                      truncates to it (with an ellipsis) and adapts on resize. */}
+                  <div
+                    className={cn(
+                      "line-clamp-2 break-words text-sm",
+                      disabled && "opacity-50",
                     )}
+                  >
+                    {r.rule_text}
                   </div>
+                  {(r.category || r.path_pattern) && (
+                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                      {r.category}
+                      {r.path_pattern ? ` · ${r.path_pattern}` : ""}
+                    </div>
+                  )}
                 </TableCell>
                 <TableCell className="align-top">
                   <StatusBadge rule={r} />
