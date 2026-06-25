@@ -531,8 +531,8 @@ function LearningsTable({
   resetKey: string
 }) {
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({
-    key: "repo",
-    dir: "asc",
+    key: "updated",
+    dir: "desc",
   })
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(20)
