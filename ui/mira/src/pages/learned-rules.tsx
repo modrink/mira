@@ -408,17 +408,19 @@ export function LearnedRulesPage() {
       >
         {selected && (
           <>
-            <div className="flex items-start justify-between gap-3 border-b p-6">
-              <div className="min-w-0 space-y-1.5">
-                <div className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
-                  <GitHubIcon className="h-3.5 w-3.5 shrink-0" />
+            <div className="flex items-center justify-between gap-3 border-b p-6">
+              <div className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-muted-foreground">
+                <GitHubIcon className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">
                   {selected.owner}/{selected.repo}
-                </div>
-                <StatusBadge rule={selected} />
+                </span>
               </div>
-              <Button variant="ghost" size="icon-sm" onClick={closeDetail} aria-label="Close">
-                <X />
-              </Button>
+              <div className="flex shrink-0 items-center gap-2">
+                <StatusBadge rule={selected} />
+                <Button variant="ghost" size="icon-sm" onClick={closeDetail} aria-label="Close">
+                  <X />
+                </Button>
+              </div>
             </div>
 
             {isAdmin && (
@@ -465,6 +467,7 @@ export function LearnedRulesPage() {
                 <p className="whitespace-pre-wrap text-sm">{selected.rule_text}</p>
               </div>
               <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
+                <Meta label="Repo" value={`${selected.owner}/${selected.repo}`} />
                 <Meta label="Category" value={selected.category || "—"} />
                 <Meta label="Path pattern" value={selected.path_pattern || "Any"} />
                 <Meta
@@ -598,15 +601,19 @@ function LearningsTable({
                   </span>
                 </TableCell>
                 <TableCell className="align-top">
-                  <div className={cn("line-clamp-2 text-sm", disabled && "opacity-50")}>
-                    {r.rule_text}
-                  </div>
-                  {(r.category || r.path_pattern) && (
-                    <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                      {r.category}
-                      {r.path_pattern ? ` · ${r.path_pattern}` : ""}
+                  <div className="max-w-[460px]">
+                    <div
+                      className={cn("line-clamp-2 text-sm", disabled && "opacity-50")}
+                    >
+                      {r.rule_text}
                     </div>
-                  )}
+                    {(r.category || r.path_pattern) && (
+                      <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                        {r.category}
+                        {r.path_pattern ? ` · ${r.path_pattern}` : ""}
+                      </div>
+                    )}
+                  </div>
                 </TableCell>
                 <TableCell className="align-top">
                   <StatusBadge rule={r} />
