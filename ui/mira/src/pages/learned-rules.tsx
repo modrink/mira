@@ -130,6 +130,7 @@ export function LearnedRulesPage() {
   const tab: "approved" | "pending" =
     params.get("tab") === "pending" ? "pending" : "approved"
   const setTab = (t: "approved" | "pending") => {
+    setPanelOpen(false) // switching tabs closes any open detail panel
     const next = new URLSearchParams(params)
     next.set("tab", t)
     setParams(next)
