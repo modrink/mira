@@ -205,6 +205,42 @@ def test_creator_cannot_edit_once_approved(patched_db: AppDatabase):
     assert exc.value.status_code == 403
 
 
+def test_other_non_admin_cannot_read_pending(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    created = api.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="original", category="style"),
+        _Req(is_admin=False, username="junior"),
+    )
+    with pytest.raises(HTTPException) as exc:
+        api.get_learned_rule_detail(
+            "acme", "web", created.id, _Req(is_admin=False, username="someone-else")
+        )
+    assert exc.value.status_code == 403
+    # Creator and admin can still read it.
+    assert (
+        api.get_learned_rule_detail(
+            "acme", "web", created.id, _Req(is_admin=False, username="junior")
+        ).id
+        == created.id
+    )
+    assert (
+        api.get_learned_rule_detail(
+            "acme", "web", created.id, _Req(is_admin=True, username="boss")
+        ).id
+        == created.id
+    )
+    # Once approved, anyone authenticated can read it.
+    api.approve_learned_rule("acme", "web", created.id, _Req(is_admin=True))
+    assert (
+        api.get_learned_rule_detail(
+            "acme", "web", created.id, _Req(is_admin=False, username="someone-else")
+        ).status
+        == "approved"
+    )
+
+
 def test_admin_can_edit_anyones_rule(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
     created = api.create_learned_rule(

@@ -213,29 +213,32 @@ export function LearnedRulesPage() {
 
   // After approving/rejecting in the queue, advance to the next pending rule
   // so the admin can clear the queue without reopening the panel — close only
-  // when none are left.
-  const advancePending = () => {
-    if (!selected) return
+  // when none are left. The next rule is computed before the API call (the
+  // list is refreshed by then) and applied once the action resolves.
+  const computeNextPending = () => {
+    if (!selected) return () => {}
     const list = applyFilter(pending)
     const idx = list.findIndex((r) => ruleKey(r) === ruleKey(selected))
     const remaining = list.filter((r) => ruleKey(r) !== ruleKey(selected))
-    if (remaining.length === 0) {
-      closeDetail()
-      return
+    const next = remaining.length ? remaining[Math.min(idx, remaining.length - 1)] : null
+    return () => {
+      if (next) setSelected(next)
+      else closeDetail()
     }
-    setSelected(remaining[Math.min(idx, remaining.length - 1)])
   }
 
   // Panel actions operate on the selected rule.
   const approveSel = () => {
     if (!selected) return
+    const advance = computeNextPending()
     act(() => api.approveLearnedRule(selected.owner, selected.repo, selected.id), "Approved")
-    advancePending()
+      .then(advance)
   }
   const rejectSel = () => {
     if (!selected) return
+    const advance = computeNextPending()
     act(() => api.rejectLearnedRule(selected.owner, selected.repo, selected.id), "Rejected")
-    advancePending()
+      .then(advance)
   }
   const toggleSel = (active: boolean) => {
     if (!selected) return

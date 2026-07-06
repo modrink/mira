@@ -1707,10 +1707,17 @@ def get_learned_rule_detail(
 ) -> OrgLearnedRuleModel:
     """Single learned rule — backs the edit page. Readable by any authenticated
     user (so a creator can load their own pending rule to edit)."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    is_admin = bool(getattr(user, "is_admin", False))
+    username = getattr(user, "username", "") if user else ""
     with _open_store(owner, repo) as store:
         r = store.get_learned_rule(rule_id)
     if not r:
         raise HTTPException(status_code=404, detail="Learning not found")
+    if r.status != "approved" and not is_admin and r.created_by != username:
+        raise HTTPException(status_code=403, detail="Not allowed to view this learning")
     return OrgLearnedRuleModel(
         id=r.id,
         owner=owner,
@@ -1796,10 +1803,7 @@ def update_learned_rule(
         existing = store.get_learned_rule(rule_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Learning not found")
-        if not (
-            is_admin
-            or (existing.created_by == username and existing.status == "pending")
-        ):
+        if not (is_admin or (existing.created_by == username and existing.status == "pending")):
             raise HTTPException(status_code=403, detail="Not allowed to edit this learning")
         store.update_learned_rule(rule_id, body.rule_text, body.category, body.path_pattern)
     return {"ok": True}
