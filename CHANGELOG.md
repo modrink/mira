@@ -4,6 +4,28 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-07-07
+
+### Added
+
+- **Learnings approval queue** — auto-synthesized learnings now land as *pending* and must be approved by an admin before they influence reviews. Approve or reject from a queue-clearing side panel or straight from the dashboard's pending-learnings widget.
+- **Anyone can propose a learning** — non-admin submissions are created as pending; creators can edit or delete their own pending learnings while admins manage everything. Learnings track their author and show an avatar + username.
+- **Learnings page overhaul** — dedicated add/edit page (replacing the modal), sortable and paginated table (recently-updated first), repo/status/enabled filters with search, URL-driven tabs so browser Back works, and GitHub links per repo.
+- **Newest frontier models in the registry** — Claude Sonnet 5, Claude Opus 4.8, Claude Fable 5, GPT-5.2, Gemini 3.1 Pro Preview, DeepSeek V4 Flash/Pro, and MiniMax M3, with pricing and ids verified against the live OpenRouter catalog.
+
+### Changed
+
+- **Superseded registry entries removed** — GPT-4o and GPT-4o mini, GPT-4.1 Mini, Gemini 2.5 Flash/Pro, MiniMax M2.7, and the OpenRouter Claude Opus 4.6 id (the Bedrock profile remains). Deployments still configured with these keep working — the dashboard accepts any id the configured backend serves; they just lose curated pricing metadata.
+- **Recommended defaults unchanged** — Claude Sonnet 4.6 for reviews and Claude Haiku 4.5 for indexing were benchmarked on the review-quality baseline and keep the badge until a newer model measurably beats them.
+
+### Fixed
+
+- **Dark mode dropdown contrast** — popovers and select menus use an elevated surface color instead of blending invisibly into the card behind them.
+- **Pending learnings are private** — the learned-rule detail endpoint requires authentication and returns 403 when a non-admin reads someone else's pending/rejected learning.
+- The learnings panel advances to the next pending item only after the approve/reject call resolves.
+- Database inserts that fail to produce a row id now raise instead of silently returning id 0 (learned rules, feedback events).
+- The learned-rules API client URL-encodes the status query parameter.
+
 ## [0.4.1] — 2026-07-06
 
 ### Added
@@ -197,6 +219,8 @@ Initial public release.
 - `handle_push_index` now updates `updated_at` after incremental re-indexing
   so the "Indexed X ago" timestamp tracks reality.
 
+[0.5.0]: https://github.com/miracodeai/mira/releases/tag/v0.5.0
+[0.4.1]: https://github.com/miracodeai/mira/releases/tag/v0.4.1
 [0.4.0]: https://github.com/miracodeai/mira/releases/tag/v0.4.0
 [0.3.1]: https://github.com/miracodeai/mira/releases/tag/v0.3.1
 [0.3.0]: https://github.com/miracodeai/mira/releases/tag/v0.3.0
