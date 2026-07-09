@@ -573,6 +573,16 @@ class ReviewEngine:
                         await self.provider.post_comment(pr_info, markdown)
                 except Exception as exc:
                     logger.warning("Failed to post walkthrough comment: %s", exc)
+        elif placeholder_id is not None:
+            # No walkthrough (all files excluded, empty diff, or generation
+            # failed) — finalize the placeholder so it doesn't sit on
+            # "Reviewing this PR…" forever.
+            reason = result.skipped_reason or result.summary or "Walkthrough was not generated."
+            markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
+            try:
+                await self.provider.update_comment(pr_info, placeholder_id, markdown)
+            except Exception as exc:
+                logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
 
         logger.info(
             "Thread resolution for PR %s: checked %d, resolved %d",

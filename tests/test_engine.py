@@ -601,6 +601,30 @@ class TestReviewEngine:
         assert mock_provider.update_comment.call_count >= 1
 
     @pytest.mark.asyncio
+    async def test_placeholder_finalized_when_all_files_excluded(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """A diff whose files are all excluded still finalizes the placeholder
+        instead of leaving it stuck on 'Reviewing this PR…' (#162)."""
+        mock_provider.get_pr_diff.return_value = (
+            "diff --git a/poetry.lock b/poetry.lock\n"
+            "--- a/poetry.lock\n"
+            "+++ b/poetry.lock\n"
+            "@@ -1,1 +1,2 @@\n"
+            " line\n"
+            "+new\n"
+        )
+        mock_provider.find_bot_comment = AsyncMock(side_effect=[None, 7])
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        result = await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        assert result.walkthrough is None
+        update_bodies = [c[0][2] for c in mock_provider.update_comment.call_args_list]
+        assert any("All files matched exclusion rules" in b for b in update_bodies)
+        assert not any("Reviewing this PR" in b for b in update_bodies)
+
+    @pytest.mark.asyncio
     async def test_walkthrough_upsert_failure_does_not_block_review(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock
     ):
