@@ -50,13 +50,13 @@ class ReconnectingCursor:
         return self._retry("execute", *args, **kwargs)
 
     def fetchone(self, *args: Any, **kwargs: Any) -> Any:
-        return self._retry("fetchone", *args, **kwargs)
+        return self._cur.fetchone(*args, **kwargs)
 
     def fetchall(self, *args: Any, **kwargs: Any) -> Any:
-        return self._retry("fetchall", *args, **kwargs)
+        return self._cur.fetchall(*args, **kwargs)
 
     def fetchmany(self, *args: Any, **kwargs: Any) -> Any:
-        return self._retry("fetchmany", *args, **kwargs)
+        return self._cur.fetchmany(*args, **kwargs)
 
     def executemany(self, *args: Any, **kwargs: Any) -> Any:
         return self._retry("executemany", *args, **kwargs)
