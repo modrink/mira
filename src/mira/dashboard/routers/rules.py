@@ -214,6 +214,8 @@ def create_learned_rule(
     # Anyone authenticated may author a learning; admins' land approved, while
     # everyone else's go to the pending queue for an admin to approve.
     user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     is_admin = bool(getattr(user, "is_admin", False))
     with _open_store(owner, repo) as store:
         r = store.create_learned_rule(
@@ -244,6 +246,8 @@ def update_learned_rule(
     # Admins may edit any rule; a non-admin may edit only their own rule while
     # it's still pending approval.
     user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     is_admin = bool(getattr(user, "is_admin", False))
     username = getattr(user, "username", "") if user else ""
     with _open_store(owner, repo) as store:
