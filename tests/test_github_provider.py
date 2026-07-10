@@ -1069,6 +1069,65 @@ class TestResolveThreads:
         assert count == 1
 
 
+class TestIsAncestor:
+    @pytest.mark.asyncio
+    async def test_missing_sha_is_not_ancestor(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        pr_info = _make_pr_info()
+        assert await provider.is_ancestor(pr_info, "", "head") is False
+
+    @pytest.mark.asyncio
+    async def test_404_compare_is_not_ancestor(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        pr_info = _make_pr_info()
+
+        async def _mock_get(self, url, **kwargs):
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        with patch.object(httpx.AsyncClient, "get", _mock_get):
+            assert await provider.is_ancestor(pr_info, "old", "new") is False
+
+    @pytest.mark.asyncio
+    async def test_ahead_compare_is_ancestor(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        pr_info = _make_pr_info()
+
+        async def _mock_get(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ahead",
+                    "merge_base_commit": {"sha": "old"},
+                },
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", _mock_get):
+            assert await provider.is_ancestor(pr_info, "old", "new") is True
+
+    @pytest.mark.asyncio
+    async def test_diverged_compare_is_not_ancestor(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        pr_info = _make_pr_info()
+
+        async def _mock_get(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json={
+                    "status": "diverged",
+                    "merge_base_commit": {"sha": "unrelated"},
+                },
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", _mock_get):
+            assert await provider.is_ancestor(pr_info, "old", "new") is False
+
+
 class TestGetFileContent:
     @pytest.mark.asyncio
     async def test_returns_decoded_content(self):

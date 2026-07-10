@@ -188,6 +188,29 @@ class GitLabProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to fetch compare diff: {e}") from e
 
+    async def is_ancestor(
+        self, pr_info: PRInfo, ancestor_sha: str, descendant_sha: str
+    ) -> bool:
+        """True when ancestor_sha is reachable from descendant_sha (rebase detection)."""
+        if not ancestor_sha or not descendant_sha:
+            return False
+        if ancestor_sha == descendant_sha:
+            return True
+        url = (
+            f"{self._project(pr_info)}/repository/compare"
+            f"?from={ancestor_sha}&to={descendant_sha}"
+        )
+        try:
+            resp = await self._request("GET", url, ok=(200, 404))
+        except ProviderError as exc:
+            raise ProviderError(f"Failed to check commit ancestry: {exc}") from exc
+        if resp.status_code == 404:
+            return False
+        data = resp.json()
+        if data.get("compare_same_ref"):
+            return True
+        return bool(data.get("diffs") or data.get("commits"))
+
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Raw file content at a ref — used to verify a thread's fix landed."""
         url = (
