@@ -399,11 +399,12 @@ async def complete_setup(body: SetupRequest) -> dict:
     enabled_count = 0
     for r in body.repos:
         owner, repo = r["owner"], r["repo"]
+        platform = r.get("platform", "github")
         enabled = r.get("enabled", True)
         mode = body.index_mode if enabled else "none"
-        _api._app_db.set_repo_index_mode(owner, repo, mode)
+        _api._app_db.set_repo_index_mode(owner, repo, mode, platform=platform)
         if enabled:
-            _api._app_db.set_repo_status(owner, repo, "indexing")
+            _api._app_db.set_repo_status(owner, repo, "indexing", platform=platform)
             enabled_count += 1
 
     _api._app_db.mark_setup_complete()

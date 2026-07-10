@@ -4,6 +4,7 @@
 export interface RepoListItem {
   owner: string
   repo: string
+  platform: string
   status: string
   index_mode: string
   file_count: number

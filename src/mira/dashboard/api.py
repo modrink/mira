@@ -399,7 +399,7 @@ class PendingUninstallModel(BaseModel):
 
 
 class SetupRequest(BaseModel):
-    repos: list[dict]  # [{"owner": "x", "repo": "y", "enabled": true}]
+    repos: list[dict]  # [{"owner": "x", "repo": "y", "platform": "github", "enabled": true}]
     index_mode: str  # "full" or "light"
 
 

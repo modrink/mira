@@ -87,6 +87,7 @@ export function SetupModal({
       repos.map((r) => ({
         owner: r.owner,
         repo: r.repo,
+        platform: r.platform,
         enabled: true,
       })),
       "full",
@@ -100,7 +101,7 @@ export function SetupModal({
     // table after each call.
     api
       .completeSetup(
-        repos.map((r) => ({ owner: r.owner, repo: r.repo, enabled: false })),
+        repos.map((r) => ({ owner: r.owner, repo: r.repo, platform: r.platform, enabled: false })),
         "full",
       )
       .finally(() => onComplete())

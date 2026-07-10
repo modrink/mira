@@ -111,8 +111,11 @@ async def sync_repos() -> dict:
     removed = 0
     if installations_reachable and actual_repos:
         for db_repo in _api._app_db.list_repos():
+            # This sync only reconciles GitHub installations — leave GitLab rows alone.
+            if db_repo.platform != "github":
+                continue
             if (db_repo.owner, db_repo.repo) not in actual_repos:
-                _api._app_db.delete_repo(db_repo.owner, db_repo.repo)
+                _api._app_db.delete_repo(db_repo.owner, db_repo.repo, platform=db_repo.platform)
                 removed += 1
 
     return {
