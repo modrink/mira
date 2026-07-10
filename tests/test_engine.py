@@ -1302,6 +1302,7 @@ class TestIncrementalDiff:
         )
         mock_provider.get_pr_diff = AsyncMock(return_value=full_diff)
         mock_provider.get_compare_diff = AsyncMock(return_value=incremental)
+        mock_provider.is_ancestor = AsyncMock(return_value=True)
         mock_provider.get_unresolved_bot_threads = AsyncMock(return_value=[])
         mock_provider.get_all_bot_threads = AsyncMock(return_value=threads)
         mock_provider.find_bot_comment = AsyncMock(return_value=None)
@@ -1311,13 +1312,31 @@ class TestIncrementalDiff:
         return mock_provider
 
     @pytest.mark.asyncio
-    async def test_round_2_uses_incremental_when_sha_stored(self, monkeypatch):
-        """If a last_reviewed_sha exists for this PR, fetch and use the
-        incremental diff (last_sha..head_sha) instead of the full PR diff."""
+    async def test_round_2_uses_pr_scoped_incremental_when_sha_stored(self, monkeypatch):
+        """Round 2 intersects push delta with PR file paths."""
         from mira.core.engine import ReviewEngine
 
+        pr_diff = """diff --git a/src/mira/db/postgres.py b/src/mira/db/postgres.py
+index 1111111..2222222 100644
+--- a/src/mira/db/postgres.py
++++ b/src/mira/db/postgres.py
+@@ -1 +1 @@
+-old
++new
+"""
+        push_delta = pr_diff + """
+diff --git a/src/mira/dashboard/routers/repos.py b/src/mira/dashboard/routers/repos.py
+index 3333333..4444444 100644
+--- a/src/mira/dashboard/routers/repos.py
++++ b/src/mira/dashboard/routers/repos.py
+@@ -1 +1 @@
+-upstream
++upstream-main
+"""
         mock_provider = self._provider_with_threads_and_compare(
             threads=[self._make_thread()],
+            full_diff=pr_diff,
+            incremental=push_delta,
         )
 
         mock_db = MagicMock()
@@ -1344,12 +1363,143 @@ class TestIncrementalDiff:
         )
         await engine.review_pr("https://github.com/o/r/pull/1")
 
-        # Compare API was called with the right SHAs and result was used.
         mock_provider.get_compare_diff.assert_awaited_once()
         args = mock_provider.get_compare_diff.call_args
         assert args.args[1] == "OLD_SHA"
         assert args.args[2] == "HEAD_SHA"
-        assert captured["diff_text"] == "INCR"
+        assert "postgres.py" in captured["diff_text"]
+        assert "repos.py" not in captured["diff_text"]
+
+    @pytest.mark.asyncio
+    async def test_round_2_skips_when_scoped_empty_after_merge_main(self, monkeypatch):
+        """Merge-from-base with no PR-scoped file changes skips the review."""
+        from mira.core.engine import ReviewEngine
+
+        pr_diff = """diff --git a/src/mira/db/postgres.py b/src/mira/db/postgres.py
+index 1111111..2222222 100644
+--- a/src/mira/db/postgres.py
++++ b/src/mira/db/postgres.py
+@@ -1 +1 @@
+-old
++new
+"""
+        upstream_only = """diff --git a/src/mira/dashboard/routers/repos.py b/src/mira/dashboard/routers/repos.py
+index 3333333..4444444 100644
+--- a/src/mira/dashboard/routers/repos.py
++++ b/src/mira/dashboard/routers/repos.py
+@@ -1 +1 @@
+-upstream
++upstream-main
+"""
+        mock_provider = self._provider_with_threads_and_compare(
+            threads=[self._make_thread()],
+            full_diff=pr_diff,
+            incremental=upstream_only,
+        )
+
+        mock_db = MagicMock()
+        mock_db.get_last_reviewed_sha = MagicMock(return_value="OLD_SHA")
+        mock_db.get_repo = MagicMock(return_value=None)
+        mock_db.set_last_reviewed_sha = MagicMock()
+        monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
+
+        captured: dict = {}
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["diff_text"] = diff_text
+            from mira.models import ReviewResult
+
+            return ReviewResult(comments=[], summary="")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert captured.get("diff_text") == ""
+
+    @pytest.mark.asyncio
+    async def test_round_2_uses_full_pr_diff_on_rebase(self, monkeypatch):
+        """Force-push / rebase falls back to the full PR diff."""
+        from mira.core.engine import ReviewEngine
+
+        mock_provider = self._provider_with_threads_and_compare(
+            threads=[self._make_thread()],
+            full_diff="FULL",
+            incremental="INCR",
+        )
+        mock_provider.is_ancestor = AsyncMock(return_value=False)
+
+        mock_db = MagicMock()
+        mock_db.get_last_reviewed_sha = MagicMock(return_value="OLD_SHA")
+        mock_db.get_repo = MagicMock(return_value=None)
+        mock_db.set_last_reviewed_sha = MagicMock()
+        monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
+
+        captured: dict = {}
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["diff_text"] = diff_text
+            from mira.models import ReviewResult
+
+            return ReviewResult(comments=[], summary="")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        await engine.review_pr("https://github.com/o/r/pull/1")
+
+        mock_provider.get_compare_diff.assert_not_called()
+        assert captured["diff_text"] == "FULL"
+
+    @pytest.mark.asyncio
+    async def test_review_rest_ignores_incremental(self, monkeypatch):
+        """review-rest keeps the full PR diff even when bot threads exist."""
+        from mira.core.engine import ReviewEngine
+
+        mock_provider = self._provider_with_threads_and_compare(
+            threads=[self._make_thread()],
+            full_diff="FULL",
+            incremental="INCR",
+        )
+
+        mock_db = MagicMock()
+        mock_db.get_last_reviewed_sha = MagicMock(return_value="OLD_SHA")
+        mock_db.get_repo = MagicMock(return_value=None)
+        mock_db.set_last_reviewed_sha = MagicMock()
+        monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
+
+        captured: dict = {}
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["diff_text"] = diff_text
+            from mira.models import ReviewResult
+
+            return ReviewResult(comments=[], summary="")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        engine._review_only_paths = ["src/a.py"]
+        await engine.review_pr("https://github.com/o/r/pull/1")
+
+        mock_provider.get_compare_diff.assert_not_called()
+        assert captured["diff_text"] == "FULL"
 
     @pytest.mark.asyncio
     async def test_round_2_falls_back_to_full_diff_when_no_sha(self, monkeypatch):
@@ -1450,6 +1600,91 @@ class TestIncrementalDiff:
         mock_db.set_last_reviewed_sha.assert_called_once_with(
             "o", "r", 1, "HEAD_SHA", platform="github"
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failing_method", ["is_ancestor", "get_compare_diff"])
+    async def test_round_2_falls_back_to_full_pr_on_incremental_failure(
+        self, monkeypatch, failing_method
+    ):
+        """Incremental fetch failures fall back to the full PR diff."""
+        from mira.core.engine import ReviewEngine
+
+        mock_provider = self._provider_with_threads_and_compare(
+            threads=[self._make_thread()],
+            full_diff="FULL_PR",
+            incremental="SHOULD_NOT_USE",
+        )
+        if failing_method == "is_ancestor":
+            mock_provider.is_ancestor = AsyncMock(side_effect=RuntimeError("ancestry down"))
+        else:
+            mock_provider.get_compare_diff = AsyncMock(side_effect=RuntimeError("compare down"))
+
+        mock_db = MagicMock()
+        mock_db.get_last_reviewed_sha = MagicMock(return_value="OLD_SHA")
+        mock_db.get_repo = MagicMock(return_value=None)
+        mock_db.set_last_reviewed_sha = MagicMock()
+        monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
+
+        captured: dict = {}
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["diff_text"] = diff_text
+            from mira.models import ReviewResult
+
+            return ReviewResult(comments=[], summary="")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        await engine.review_pr("https://github.com/o/r/pull/1")
+
+        if failing_method == "is_ancestor":
+            mock_provider.get_compare_diff.assert_not_called()
+        assert captured["diff_text"] == "FULL_PR"
+
+    @pytest.mark.asyncio
+    async def test_round_2_keeps_full_pr_when_head_unchanged(self, monkeypatch):
+        """No new commits since last review — skip compare, keep PR diff."""
+        from mira.core.engine import ReviewEngine
+
+        mock_provider = self._provider_with_threads_and_compare(
+            threads=[self._make_thread()],
+            full_diff="FULL_PR",
+            incremental="INCR",
+        )
+
+        mock_db = MagicMock()
+        mock_db.get_last_reviewed_sha = MagicMock(return_value="HEAD_SHA")
+        mock_db.get_repo = MagicMock(return_value=None)
+        mock_db.set_last_reviewed_sha = MagicMock()
+        monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
+
+        captured: dict = {}
+
+        async def fake_internal(self, diff_text, **kwargs):
+            captured["diff_text"] = diff_text
+            from mira.models import ReviewResult
+
+            return ReviewResult(comments=[], summary="")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        await engine.review_pr("https://github.com/o/r/pull/1")
+
+        mock_provider.is_ancestor.assert_not_called()
+        mock_provider.get_compare_diff.assert_not_called()
+        assert captured["diff_text"] == "FULL_PR"
 
 
 class TestSelfCritique:

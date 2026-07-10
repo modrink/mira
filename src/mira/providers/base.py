@@ -93,6 +93,16 @@ class BaseProvider(abc.ABC):
         """Diff between two commits, for incremental (round 2+) reviews."""
         return ""
 
+    async def is_ancestor(
+        self, pr_info: PRInfo, ancestor_sha: str, descendant_sha: str
+    ) -> bool:
+        """True when ancestor_sha is on the history path to descendant_sha."""
+        if not ancestor_sha or not descendant_sha:
+            return False
+        if ancestor_sha == descendant_sha:
+            return True
+        return True
+
     async def get_all_bot_threads(
         self, pr_info: PRInfo, bot_login: str | None = None
     ) -> list[BotThreadRecord]:

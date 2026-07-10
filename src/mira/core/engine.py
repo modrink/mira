@@ -373,6 +373,8 @@ class ReviewEngine:
 
         threads_checked, llm_resolved, unresolved_threads, thread_decisions = thread_result
 
+        pr_diff_text = diff_text
+
         _lines_changed = sum(
             1 for line in diff_text.splitlines() if line.startswith("+") or line.startswith("-")
         )
@@ -423,9 +425,11 @@ class ReviewEngine:
         except Exception as exc:
             logger.warning("Failed to compute review round: %s", exc)
 
-        # Round 2+ uses incremental diff to avoid re-flagging untouched files.
-        if review_round >= 2 and pr_info.head_sha:
+        # Round 2+ uses a PR-scoped push delta so merge-from-base does not
+        # re-review upstream files outside the PR/MR file set.
+        if review_round >= 2 and pr_info.head_sha and not is_review_rest:
             try:
+                from mira.core.incremental_diff import intersect_push_diff_with_pr
                 from mira.dashboard.api import _app_db
 
                 last_sha = _app_db.get_last_reviewed_sha(
@@ -435,35 +439,50 @@ class ReviewEngine:
                     platform=pr_info.platform,
                 )
                 if last_sha and last_sha != pr_info.head_sha:
-                    incremental = await self.provider.get_compare_diff(
-                        pr_info,
-                        last_sha,
-                        pr_info.head_sha,
-                    )
-                    if incremental.strip():
+                    if not await self.provider.is_ancestor(
+                        pr_info, last_sha, pr_info.head_sha
+                    ):
                         logger.info(
-                            "Round %d incremental diff %s..%s on PR %s (was %d chars, now %d)",
+                            "Round %d: %s not ancestor of %s on %s — full PR diff",
                             review_round,
                             last_sha[:8],
                             pr_info.head_sha[:8],
                             pr_info.url,
-                            len(diff_text),
-                            len(incremental),
                         )
-                        diff_text = incremental
                     else:
-                        logger.info(
-                            "Round %d: no new commits since %s on PR %s, skipping review",
-                            review_round,
-                            last_sha[:8],
-                            pr_info.url,
+                        push_delta = await self.provider.get_compare_diff(
+                            pr_info,
+                            last_sha,
+                            pr_info.head_sha,
                         )
-                        diff_text = ""
+                        scoped = intersect_push_diff_with_pr(pr_diff_text, push_delta)
+                        if scoped.strip():
+                            logger.info(
+                                "Round %d PR-scoped incremental %s..%s on %s "
+                                "(push %d chars → scoped %d chars, PR %d chars)",
+                                review_round,
+                                last_sha[:8],
+                                pr_info.head_sha[:8],
+                                pr_info.url,
+                                len(push_delta),
+                                len(scoped),
+                                len(pr_diff_text),
+                            )
+                            diff_text = scoped
+                        else:
+                            logger.info(
+                                "Round %d: no PR-scoped changes since %s on %s, skipping",
+                                review_round,
+                                last_sha[:8],
+                                pr_info.url,
+                            )
+                            diff_text = ""
             except Exception as exc:
                 logger.warning(
-                    "Incremental diff fetch failed, falling back to full diff: %s",
+                    "Incremental diff failed, falling back to full PR diff: %s",
                     exc,
                 )
+                diff_text = pr_diff_text
 
         team_conventions = ""
         try:

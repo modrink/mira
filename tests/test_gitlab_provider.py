@@ -243,6 +243,36 @@ class TestCompareDiff:
         assert out == ""
 
 
+class TestIsAncestor:
+    @pytest.mark.asyncio
+    async def test_missing_sha_is_not_ancestor(self):
+        assert await GitLabProvider("tok").is_ancestor(_PR, "", "head") is False
+
+    @pytest.mark.asyncio
+    async def test_404_compare_is_not_ancestor(self):
+        def handler(method, url, **kw):
+            return _FakeResp(status=404)
+
+        with _patch(handler):
+            assert await GitLabProvider("tok").is_ancestor(_PR, "old", "new") is False
+
+    @pytest.mark.asyncio
+    async def test_compare_with_diffs_is_ancestor(self):
+        def handler(method, url, **kw):
+            return _FakeResp(json_data={"diffs": [{"diff": "@@\n"}]})
+
+        with _patch(handler):
+            assert await GitLabProvider("tok").is_ancestor(_PR, "old", "new") is True
+
+    @pytest.mark.asyncio
+    async def test_empty_compare_is_not_ancestor(self):
+        def handler(method, url, **kw):
+            return _FakeResp(json_data={"diffs": [], "commits": []})
+
+        with _patch(handler):
+            assert await GitLabProvider("tok").is_ancestor(_PR, "old", "new") is False
+
+
 class TestResolveThreads:
     @pytest.mark.asyncio
     async def test_puts_resolved_true(self):

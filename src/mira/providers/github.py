@@ -238,6 +238,40 @@ class GitHubProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to fetch compare diff: {e}") from e
 
+    async def is_ancestor(
+        self, pr_info: PRInfo, ancestor_sha: str, descendant_sha: str
+    ) -> bool:
+        """True when ancestor_sha is reachable from descendant_sha (rebase detection)."""
+        if not ancestor_sha or not descendant_sha:
+            return False
+        if ancestor_sha == descendant_sha:
+            return True
+        url = (
+            f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}"
+            f"/compare/{ancestor_sha}...{descendant_sha}"
+        )
+        headers = {
+            "Authorization": f"token {self._token}",
+            "Accept": "application/vnd.github+json",
+        }
+
+        @_retry_transient
+        async def _fetch() -> bool:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, headers=headers, follow_redirects=True)
+                if resp.status_code == 404:
+                    return False
+                resp.raise_for_status()
+                data = resp.json()
+            merge_base = (data.get("merge_base_commit") or {}).get("sha", "")
+            status = data.get("status", "")
+            return merge_base == ancestor_sha or status in {"ahead", "identical"}
+
+        try:
+            return await _fetch()
+        except Exception as e:
+            raise ProviderError(f"Failed to check commit ancestry: {e}") from e
+
     async def post_review(
         self,
         pr_info: PRInfo,

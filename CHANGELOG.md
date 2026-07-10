@@ -4,6 +4,12 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Round 2+ incremental reviews stay PR-scoped** — push deltas are intersected with the PR/MR file set so merging the base branch no longer re-reviews upstream changes. Rebase/force-push falls back to the full PR diff.
+
 ## [0.6.0] — 2026-07-10
 
 ### Added
