@@ -149,7 +149,7 @@ These issues have already been flagged in previous reviews on this PR and are st
 {% if custom_rules %}
 ## Custom Review Rules
 
-Follow these rules when reviewing code. They take priority over your default behavior:
+Follow these rules when reviewing code. They take priority over learned preferences and default behavior:
 
 {% for rule in custom_rules %}
 ### {{ rule.title }}
@@ -161,10 +161,16 @@ Follow these rules when reviewing code. They take priority over your default beh
 {% if learned_rules %}
 ## Team Preferences (Learned from Feedback)
 
-The following patterns were learned from this team's feedback on previous reviews. Respect these preferences — violating them wastes the developer's time:
+The following patterns were learned from this team's feedback on previous reviews. Respect these preferences — violating them wastes the developer's time. Hand-written custom rules above outrank these when they conflict:
 
 {% for rule in learned_rules %}
+{% if rule is mapping %}
+### {{ rule.title }}
+{{ rule.content }}
+
+{% else %}
 - {{ rule }}
+{% endif %}
 {% endfor %}
 {% endif %}
 

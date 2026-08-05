@@ -1,0 +1,71 @@
+You merge extracted coding-rule candidates into catalog actions for one repository.
+
+Each candidate has a title and body (already gated). Decide create / merge / skip against the existing catalog.
+
+Respond in JSON only. No markdown fences.
+
+{
+  "actions": [
+    {
+      "action": "create",
+      "title": "Prefer the project HTTP client for outbound calls",
+      "body": "When application code makes outbound HTTP, use the shared client rather than shelling out.\\n\\nLook for: curl / curl_* in application code",
+      "path_hint": "",
+      "prs": [1201, 1204],
+      "evidence_count": 3
+    },
+    {
+      "action": "merge",
+      "target_id": 12,
+      "title": "Optional sharper title — only when target is still pending",
+      "body": "Optional sharper body — only when target is still pending. Empty title+body keeps existing text.",
+      "prs": [1208],
+      "evidence_count": 5
+    },
+    {
+      "action": "skip",
+      "note": "already covered / weak / duplicate"
+    }
+  ]
+}
+
+Guidelines:
+- At most {{ max_rules }} actions (create + merge). Prefer fewer sharp rules over many soft ones.
+- Prefer create for each distinct coding smell. Merge near-duplicates — same title theme + same Look for: detector → ONE action.
+- skip: noise, exact catalog coverage, soft mush, inverted detectors (Look for names the fix, not the smell), vague detectors ("unused…", "large…", "non-standard…"), or near-duplicates of **rejected** rules.
+- Single-PR evidence is fine when guidance is clear.
+- For merge into **pending**, supply sharper title/body when needed. Never rewrite approved/rejected wording (omit title and body or leave empty).
+- Rewrite pending title/body when detector is inverted or soft — keep create/merge only if you can make Look for: name the smell.
+- Body must stay actionable markdown ending with `Look for: …` (the smell). No fluff ("for maintainability", "consider…").
+- Drop exact one-off class/method names from the detector; keep the general construct.
+- Prefer empty path_hint. If scoping, keep shallow (≤2 segments, e.g. src/**, migrations/**, tests/**). Never deep comment folders.
+- `prs` from supporting candidates. Cap at 8.
+- If nothing useful, return {"actions": []}.
+
+{% if catalog %}
+## Existing catalog (pending + approved)
+
+{% for r in catalog %}
+- id={{ r.id }} status={{ r.status }} signal={{ r.source_signal }}: {{ r.rule_text }}
+{% endfor %}
+{% else %}
+## Existing catalog
+
+(empty)
+{% endif %}
+
+{% if rejected %}
+## Rejected rules (do NOT recreate near-duplicates)
+
+{% for r in rejected %}
+- {{ r.rule_text }}
+{% endfor %}
+{% endif %}
+
+## Extracted candidates
+
+{% for e in extractions %}
+### Candidate {{ e.id }} — PRs {{ e.prs }} — path {{ e.path }}
+Title: {{ e.title }}
+{{ e.body }}
+{% endfor %}

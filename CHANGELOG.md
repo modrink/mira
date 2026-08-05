@@ -4,10 +4,50 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Unified Rules API.** `GET/POST/PUT /api/rules` (+ approve/reject/enabled/delete) exposes one product Rule row (`kind`: written_global | written_repo | learned) over the existing stores. Legacy `/api/rules/global`, `/api/repos/.../rules`, and `/api/learned-rules*` remain as aliases.
+- **Catalog-aware learnings synthesis.** Human-pattern synth now receives the existing pending/approved catalog and returns create / merge / skip actions in one LLM call, so re-runs reinforce covered patterns instead of minting near-duplicates. Admins can **Rebuild learnings** from Rules (or `mira synthesize-learnings`) without re-fetching GitHub history.
+- **Live-merge LLM synth cooldown.** Deterministic reject-pattern updates still run on every merge; the catalog LLM call is debounced (`MIRA_LEARN_SYNTH_COOLDOWN_SEC`, default 3600). Backfill end and admin re-synthesize always force a run.
+- **Path-scoped learned rules.** File globs on learned rows (`src/**`, etc.) now filter which chunks see the rule. Internal `__human_*__` identity keys still apply everywhere.
+- **Evidence PR links.** Synthesized learnings store supporting PR numbers (`evidence_prs`); shown in the Rules detail drawer.
+- **Near-duplicate merge.** Creating a human-pattern / form / `@remember` rule that is textually near an existing catalog entry merges into that row instead of minting another pending.
+- **`@bot remember <rule>`.** Mentions capture a pending learning for admin approval (Rules → Pending).
+- **Repo instruction ingest.** Reviews pull `REVIEW.md` / `AGENTS.md` / `CLAUDE.md` / `.cursorrules` / Copilot / Gemini styleguide files from the PR base tip into custom rule context (capped).
+
+### Changed
+
+- **Rule scope on edit.** Edit form Scope: **All repos (Global)** or **Selected repos**. Learned multi-repo = backend copies linked by `group_id`, UI shows one row + repos list. Approve/reject/delete/enable fan out. Written stays Global ↔ one repo (multi → use Global).
+- **Rules Pending + Active.** Sidebar **Rules** is one product surface: **Pending** (awaiting approval) and **Active** (written + approved learned). Add/Edit at `/rules/new` and `/rules/edit`. **Add rule** only offers Global / Per-repo. Legacy Inbox/Catalog mode aliases and `/learnings*` redirects still work.
+- **Dropped accept_pattern generation.** High accept-rate categories no longer become tautological “team values X” rules. Existing accept_pattern rows are hidden from the Rules UI and excluded from review injection; reject_pattern and human_pattern behavior is unchanged.
+- **Guidance priority documented.** Review prompts treat org/global and hand-written repo rules as outranking mined learnings when they conflict. Cost estimate for learnings backfill accounts for a larger catalog-aware prompt (~16k input tokens/repo).
+- **Learnings backfill polish.** Catalog **Backfill** dialog shows new/skipped counts, a rough synth cost estimate (from stored feedback + catalog + max PRs; updates when selection changes), and a last-run status strip. Progress is per-PR (not every 10); waiting repos show Queued; listing phase shows max PRs until the merged list is known. Repos stay sequential (shared GitHub rate limit).
+- **Learned rule text quality.** Human-pattern synth is a **bounded multi-stage pipeline**: hunk-preferring sample → batch classify (default SKIP) → capped extract → catalog cluster. Learned rules are **titled** (`title` + markdown `body` packed in `rule_text`), ending with a `Look for:` **smell** detector. Soft mush / inverted detectors gated out. Path scope is LLM-chosen and shallow-capped (≤2 directory segments); prefer repo-wide. Admin **Rebuild** clears auto-synth Pending first (keeps `@remember`). Rejected near-dupes are not recreated. Inject truncates long bodies (`MIRA_LEARNED_INJECT_BODY_MAX`, default 600) while keeping the detector line. Env: `MIRA_HUMAN_SYNTH_EXTRACT_CAP` (25), `MIRA_HUMAN_SYNTH_CLASSIFY_BATCH` (25), `MIRA_HUMAN_SYNTH_EXTRACT_BATCH` (10).
+- **Rebuild / synth progress.** **Rebuild learnings** runs in the background (same progress blobs as Backfill) with `job=synth` and classify / extract / cluster phase labels. Status strip shows on Active **and** Pending; admin Rebuild/Backfill buttons available on both tabs. Rebuild stays disabled while a learnings job is queued/running (API returns 409 on double-kick). Strip **Open/Details** opens a job-aware progress modal (**Rebuild learnings** vs **Backfill progress**); Backfill button still opens the setup dialog.
+
+### Fixed
+
+- **Rules Pending kind filter.** Active kind filter no longer empties Pending (UI + API ignore kind/enabled in pending mode).
+- **Rule form return path.** Saving/deleting a pending learned rule returns to Pending, not Active.
+- **Creator delete pending.** Authors can delete their own pending rules (admins still delete anything).
+- **Human-pattern rules no longer overwrite fixed slots.** Synthesis keys rules by content, so new findings become new pending rows; approved/rejected text stays put and only matching wording bumps sample counts. Per-call emission cap (`MIRA_HUMAN_SYNTH_MAX_RULES`) still limits one LLM response — not the lifetime catalog size.
+- **Learnings synth sampling after backfill.** Human-pattern synthesis no longer takes the newest-by-ingest-time slice of comments (which starved fat mid-list PRs after a bulk backfill). Comments are round-robined across PRs; defaults raised to 100 comments / 8 rules (`MIRA_HUMAN_SYNTH_MAX`, `MIRA_HUMAN_SYNTH_MAX_RULES`). Still one LLM call per repo at end of backfill.
+- **Instruction ingest uses `base_branch`.** Repo instruction files are fetched from `PRInfo.base_branch` (not the empty/wrong `base_ref` field).
+- **Self-critique path scope.** Path-globbed learned rules are attached per comment path instead of dumped globally across the critique batch.
+- **Learnings inject respects platform.** Review engine opens the IndexStore with `pr_info.platform` so GitLab/Forgejo learnings are not read from the GitHub path.
+- **Dashboard hides accept_pattern.** Org-wide learned-rule lists exclude retired accept_pattern rows (dashboard pending nudge included).
+- **`@remember` near-dupe.** Reinforces an existing pending/approved learning instead of minting another pending row.
+- **PG org-wide owner keys.** Learned-rule org list decodes `_{platform}/owner` store keys so GitLab/Forgejo rows keep clean owner + platform (approve/edit/evidence links work).
+- **Learned CRUD platform.** Optional `?platform=` on learned-rule routes; UI passes it through so dual-host same-slug repos hit the right store.
+- **Form / `@remember` near-dupe.** Creating a near-duplicate learned rule merges into the existing row instead of minting another pending.
+
 ## [0.8.0] — 2026-07-27
 
 ### Added
 
+- **Learnings history backfill.** Admins can scan recent merged PRs for learnings from the Learnings page (**Backfill**) or via `mira backfill-learnings` — same accept / reject / human-review signals as live merge-time learning. Default cap is 100 merged PRs per repo; re-runs skip already-processed PRs. Approved/rejected rule text is frozen on re-synthesis (sample counts still update). GitHub only in this release.
 - **Opt out of per-commit reviews.** `review.review_on_synchronize` (default `true`) controls whether every push to an open PR triggers a fresh review. Turn it off and Mira only reviews when a PR is opened or reopened — later commits are ignored until someone comments `@bot review`. Useful when you batch commits locally before pushing and only want the final diff reviewed, saving tokens and cutting mid-work noise. Honoured on GitHub, GitLab, and Forgejo, and toggleable from the Settings page.
 - **Duplicate-dependency warnings.** A new dependency-review pass flags when a PR adds a package that overlaps in function with one the repo already has (e.g. `react-table` is present and the PR adds `@tanstack/react-table`). It runs on the indexing tier and only when the PR touches a manifest (`package.json`, `pyproject.toml`, `go.mod`, …), so most PRs make no extra LLM call; it compares the added deps against the repo's existing package names from the index (falling back to the manifest diff on an unindexed repo), tags findings `category=dependency`, and merges them into the normal review so they go through the same noise filter and self-critique. Lockfiles are excluded (transitive churn is noise). Gated by `review.dependency_overlap` (default on), admin-toggleable in Settings.
 - **Configurable LLM retry and timeout.** Four new `llm` keys — `max_retries` (3), `request_timeout` (120s), `retry_min_wait` (2s), `retry_max_wait` (30s) — read at runtime instead of being baked in at import time. Raise them for flex-tier models or proxied endpoints that stall under load. Documented in `.mira.yaml.example`.

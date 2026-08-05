@@ -494,6 +494,8 @@ class HumanReviewComment:
     line: int
     body: str
     author: str
+    # Diff hunk from the review comment (GitHub); empty when provider omits it.
+    diff_hunk: str = ""
 
 
 @dataclass
@@ -539,7 +541,7 @@ class LearnedRule:
 
     id: int
     rule_text: str
-    source_signal: str  # 'reject_pattern' | 'accept_pattern'
+    source_signal: str  # 'reject_pattern' | 'human_pattern' | 'manual'
     category: str
     path_pattern: str  # e.g. 'tests/**' or '' for all
     sample_count: int

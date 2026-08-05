@@ -47,6 +47,8 @@ _PAUSE_KEYWORDS = {"pause"}
 
 _RESUME_KEYWORDS = {"resume"}
 
+_REMEMBER_PREFIX = "remember"
+
 
 def _open_store(owner: str, repo: str, platform: str = "github") -> IndexStore:
     """Open an IndexStore for the given owner/repo."""
@@ -62,6 +64,7 @@ def _help_message(bot_name: str) -> str:
         f"|---|---|\n"
         f"| `@{bot_name} review` | Re-run the full review on this PR. Useful after force-pushes or when you want a fresh pass. |\n"
         f"| `@{bot_name} review-rest` | Review files that were skipped on the first pass because the PR was too large. Aliases: `rest`, `continue`. |\n"
+        f"| `@{bot_name} remember <rule>` | Capture a team preference as a pending learning for admin approval. |\n"
         f"| `@{bot_name} pause` | Pause Mira on this PR. No more reviews until you resume. Adds a `mira-paused` label. |\n"
         f"| `@{bot_name} resume` | Resume Mira on a paused PR and re-review the latest diff. |\n"
         f"| `@{bot_name} help` | Show this message. Aliases: `?`, `commands`. |\n"
@@ -184,11 +187,70 @@ async def run_pr_command(
     is_review = normalized in _REVIEW_KEYWORDS
     is_review_rest = normalized in _REVIEW_REST_KEYWORDS
     is_help = normalized in _HELP_KEYWORDS
+    remember_body = ""
+    if normalized == _REMEMBER_PREFIX or normalized.startswith(_REMEMBER_PREFIX + " "):
+        remember_body = question.strip()[len(_REMEMBER_PREFIX) :].strip()
 
     if is_help:
         pr_info_for_help = await provider.get_pr_info(pr_url)
         await provider.post_comment(pr_info_for_help, _help_message(bot_name))
         logger.info("Help requested on %s by @%s", pr_url, actor)
+        return
+
+    if remember_body or normalized == _REMEMBER_PREFIX:
+        pr_info = await provider.get_pr_info(pr_url)
+        if not remember_body:
+            await provider.post_comment(
+                pr_info,
+                f"> @{actor}: usage — `@{bot_name} remember <team preference>`",
+            )
+            return
+        from mira.analysis.learned_rules import find_near_duplicate_rule, human_pattern_key
+
+        store = _open_store(owner, repo, platform)
+        try:
+            catalog = [r for r in store.list_learned_rules() if r.status != "rejected"]
+            near = find_near_duplicate_rule(remember_body, catalog)
+            if near is not None:
+                store.bump_learned_rule_evidence(
+                    near.id,
+                    max(1, near.sample_count) + 1,
+                    evidence_prs=str(number) if number else "",
+                )
+                where = "Rules → Pending" if near.status == "pending" else "Rules → Active"
+                await provider.post_comment(
+                    pr_info,
+                    f"> @{actor}: reinforced an existing **{near.status}** learning "
+                    f"(near-duplicate) — see {where}.",
+                )
+                logger.info(
+                    "Remember near-dupe on %s by @%s → rule %d",
+                    pr_url,
+                    actor,
+                    near.id,
+                )
+                return
+            row = store.create_learned_rule(
+                rule_text=remember_body[:2000],
+                category="human_review",
+                path_pattern=human_pattern_key(remember_body),
+                source_signal="manual",
+                status="pending",
+                active=True,
+                created_by=actor,
+            )
+            if number and row is not None:
+                store.bump_learned_rule_evidence(
+                    row.id, max(1, row.sample_count), evidence_prs=str(number)
+                )
+        finally:
+            store.close()
+        await provider.post_comment(
+            pr_info,
+            f"> @{actor}: remembered as a **pending** learning — an admin can approve "
+            "it on the Rules → Pending tab so it injects into future reviews.",
+        )
+        logger.info("Remember on %s by @%s (%d chars)", pr_url, actor, len(remember_body))
         return
 
     if is_review_rest:
@@ -345,9 +407,17 @@ async def run_pr_merged_learning(
     bot_name: str,
     merged_by: str,
     platform: str = "github",
-) -> None:
+    *,
+    synthesize: bool = True,
+) -> dict[str, int]:
     """Platform-neutral merge-time learning: record accept/reject + human-review
-    signals and synthesize rules. Shared by GitHub and GitLab."""
+    signals and (optionally) synthesize rules. Shared by GitHub and GitLab.
+
+    ``synthesize=False`` records feedback events only — used by historical
+    backfill so synthesis runs once per repo at the end instead of per PR.
+    Returns counts: accepted, human_recorded, deterministic_rules, llm_rules,
+    skipped (1 if this PR was already processed).
+    """
     from mira.providers.formatting import parse_bot_comment_metadata
 
     owner, repo, number, pr_url = pr_info.owner, pr_info.repo, pr_info.number, pr_info.url
@@ -357,16 +427,19 @@ async def run_pr_merged_learning(
     deterministic_rules = 0
     llm_rules = 0
     try:
-        existing = store.list_feedback(limit=2000)
-        if any(
-            e.signal in ("accepted", "human_review") and e.pr_number == number for e in existing
-        ):
+        if store.has_pr_merge_learning(number):
             logger.info("PR %s already processed for merge-time learning", pr_url)
-            return
+            return {
+                "accepted": 0,
+                "human_recorded": 0,
+                "deterministic_rules": 0,
+                "llm_rules": 0,
+                "skipped": 1,
+            }
         rejected_locations = {
             (e.comment_path, e.comment_line)
-            for e in existing
-            if e.signal == "rejected" and e.pr_number == number
+            for e in store.list_feedback_for_pr(number)
+            if e.signal == "rejected"
         }
 
         try:
@@ -404,6 +477,8 @@ async def run_pr_merged_learning(
             human_comments = []
 
         human_events: list[dict] = []
+        from mira.analysis.feedback import pack_human_comment_for_learning
+
         for hc in human_comments:
             body = (hc.body or "").strip()
             if not body:
@@ -416,7 +491,9 @@ async def run_pr_merged_learning(
                     "comment_line": hc.line,
                     "comment_category": "human_review",
                     "comment_severity": "",
-                    "comment_title": body[:2000],
+                    "comment_title": pack_human_comment_for_learning(
+                        body, getattr(hc, "diff_hunk", "") or ""
+                    ),
                     "signal": "human_review",
                     "actor": hc.author,
                     "pr_author": pr_info.author,
@@ -429,20 +506,24 @@ async def run_pr_merged_learning(
         if human_events:
             store.record_bulk_feedback(human_events)
             human_recorded = len(human_events)
+        if not bot_events and not human_events:
+            # Marker so empty PRs stay skipped on re-run (no unique event keys).
+            store.record_feedback(
+                pr_number=number,
+                pr_url=pr_url,
+                comment_path="",
+                comment_line=0,
+                comment_category="",
+                comment_severity="",
+                comment_title="",
+                signal="merge_scanned",
+                actor=merged_by,
+            )
 
-        from mira.analysis.feedback import synthesize_from_human_reviews, synthesize_rules
-
-        deterministic_rules = synthesize_rules(store)
-
-        if human_recorded > 0:
-            try:
-                config = load_config()
-                from mira.dashboard.models_config import llm_config_for
-
-                indexing_llm = create_llm(llm_config_for("indexing", config.llm))
-                llm_rules = await synthesize_from_human_reviews(store, indexing_llm)
-            except Exception as exc:
-                logger.warning("LLM rule synthesis failed for %s: %s", pr_url, exc)
+        if synthesize:
+            deterministic_rules, llm_rules = await _synthesize_from_store(
+                store, run_llm=human_recorded > 0, force_llm=False
+            )
     finally:
         store.close()
 
@@ -455,3 +536,82 @@ async def run_pr_merged_learning(
         deterministic_rules,
         llm_rules,
     )
+    return {
+        "accepted": accepted,
+        "human_recorded": human_recorded,
+        "deterministic_rules": deterministic_rules,
+        "llm_rules": llm_rules,
+        "skipped": 0,
+    }
+
+
+async def _synthesize_from_store(
+    store: Any,
+    *,
+    run_llm: bool,
+    force_llm: bool = False,
+    on_progress: Any | None = None,
+    replace_pending: bool = False,
+) -> tuple[int, int]:
+    """Deterministic reject synth + optional catalog-aware LLM synth.
+
+    Live merges debounce LLM calls via ``MIRA_LEARN_SYNTH_COOLDOWN_SEC``.
+    Backfill / admin re-synth pass ``force_llm=True`` and ``replace_pending=True``.
+    """
+    from mira.analysis.feedback import (
+        llm_synth_cooldown_elapsed,
+        mark_llm_synth,
+        synthesize_from_human_reviews,
+        synthesize_rules,
+    )
+
+    deterministic_rules = synthesize_rules(store)
+    llm_rules = 0
+    if not run_llm:
+        return deterministic_rules, llm_rules
+    if not force_llm and not llm_synth_cooldown_elapsed(store):
+        logger.info("Skipping LLM learnings synth (cooldown active)")
+        return deterministic_rules, llm_rules
+    try:
+        config = load_config()
+        from mira.dashboard.models_config import llm_config_for
+
+        indexing_llm = create_llm(llm_config_for("indexing", config.llm))
+        llm_rules = await synthesize_from_human_reviews(
+            store,
+            indexing_llm,
+            on_progress=on_progress,
+            replace_pending=replace_pending,
+        )
+        mark_llm_synth(store)
+    except Exception as exc:
+        logger.warning("LLM rule synthesis failed: %s", exc)
+    return deterministic_rules, llm_rules
+
+
+async def synthesize_repo_learnings(
+    owner: str,
+    repo: str,
+    platform: str = "github",
+    *,
+    on_progress: Any | None = None,
+) -> dict[str, int]:
+    """Run deterministic + LLM rule synthesis once for a repo's feedback store.
+
+    Used by historical backfill after all PRs have been recorded, and by
+    admin/CLI re-synthesize (no GitHub fetch). Always forces LLM when enough
+    human_review events exist. Clears auto-synth Pending before re-run.
+    """
+    store = _open_store(owner, repo, platform)
+    try:
+        human_events = [e for e in store.list_feedback(limit=2000) if e.signal == "human_review"]
+        deterministic_rules, llm_rules = await _synthesize_from_store(
+            store,
+            run_llm=len(human_events) >= 2,
+            force_llm=True,
+            on_progress=on_progress,
+            replace_pending=True,
+        )
+    finally:
+        store.close()
+    return {"deterministic_rules": deterministic_rules, "llm_rules": llm_rules}

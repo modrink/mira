@@ -200,6 +200,8 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     active INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'approved',
     created_by TEXT NOT NULL DEFAULT '',
+    evidence_prs TEXT NOT NULL DEFAULT '',
+    group_id TEXT NOT NULL DEFAULT '',
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
     updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
@@ -287,6 +289,14 @@ def _get_conn(url: str) -> Any:
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS created_by "
                     "TEXT NOT NULL DEFAULT ''"
                 )
+                cur.execute(
+                    "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS evidence_prs "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+                cur.execute(
+                    "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS group_id "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
             _schema_initialized = True
         return _pg_conn
 
@@ -311,36 +321,49 @@ def list_learned_rules_org_wide(
     """List learned rules across every repo, optionally filtered by status.
     Used by the org-wide learnings dashboard so admins can review, approve, and
     manage what Mira has synthesized across the org."""
-    where = "WHERE status = %s" if status else ""
-    params: tuple = (status, limit) if status else (limit,)
+    clauses = ["source_signal != %s"]
+    params_list: list = ["accept_pattern"]
+    if status:
+        clauses.append("status = %s")
+        params_list.append(status)
+    where = "WHERE " + " AND ".join(clauses)
+    params_list.append(limit)
     with _pg_cursor(url) as cur:
         cur.execute(
             "SELECT id, owner, repo, rule_text, source_signal, category, "
             "path_pattern, sample_count, active, status, created_by, "
-            "created_at, updated_at "
+            "evidence_prs, group_id, created_at, updated_at "
             f"FROM learned_rules {where} "
             "ORDER BY updated_at DESC LIMIT %s",
-            params,
+            tuple(params_list),
         )
         rows = cur.fetchall()
-    return [
-        {
-            "id": r[0],
-            "owner": r[1],
-            "repo": r[2],
-            "rule_text": r[3],
-            "source_signal": r[4],
-            "category": r[5],
-            "path_pattern": r[6],
-            "sample_count": r[7],
-            "active": bool(r[8]),
-            "status": r[9],
-            "created_by": r[10],
-            "created_at": r[11],
-            "updated_at": r[12],
-        }
-        for r in rows
-    ]
+    from mira.index.store import decode_store_owner_key
+
+    out: list[dict] = []
+    for r in rows:
+        platform, owner = decode_store_owner_key(r[1])
+        out.append(
+            {
+                "id": r[0],
+                "platform": platform,
+                "owner": owner,
+                "repo": r[2],
+                "rule_text": r[3],
+                "source_signal": r[4],
+                "category": r[5],
+                "path_pattern": r[6],
+                "sample_count": r[7],
+                "active": bool(r[8]),
+                "status": r[9],
+                "created_by": r[10],
+                "evidence_prs": r[11] or "",
+                "group_id": r[12] or "",
+                "created_at": r[13],
+                "updated_at": r[14],
+            }
+        )
+    return out
 
 
 def count_vulnerabilities_org_wide(url: str) -> dict[str, int]:
@@ -1343,6 +1366,40 @@ class PgIndexStore(_StoreSharedMixin):
             for r in rows
         ]
 
+    def has_pr_merge_learning(self, pr_number: int) -> bool:
+        """True if this PR was already ingested by merge-time / backfill learning."""
+        row = self._fetchone(
+            "SELECT 1 FROM feedback_events WHERE owner=%s AND repo=%s AND pr_number=%s "
+            "AND signal IN ('accepted', 'human_review', 'merge_scanned') LIMIT 1",
+            (self._owner, self._repo, pr_number),
+        )
+        return row is not None
+
+    def list_feedback_for_pr(self, pr_number: int) -> list[FeedbackEventRow]:
+        """All feedback events for one PR (reject locations, etc.)."""
+        rows = self._fetchall(
+            "SELECT id, pr_number, pr_url, comment_path, comment_line, "
+            "comment_category, comment_severity, comment_title, signal, actor, created_at "
+            "FROM feedback_events WHERE owner=%s AND repo=%s AND pr_number=%s",
+            (self._owner, self._repo, pr_number),
+        )
+        return [
+            FeedbackEventRow(
+                id=r[0],
+                pr_number=r[1],
+                pr_url=r[2],
+                comment_path=r[3],
+                comment_line=r[4],
+                comment_category=r[5],
+                comment_severity=r[6],
+                comment_title=r[7],
+                signal=r[8],
+                actor=r[9],
+                created_at=r[10],
+            )
+            for r in rows
+        ]
+
     def get_feedback_stats(self) -> dict:
         rows = self._fetchall(
             "SELECT signal, comment_category, comment_path, COUNT(*) "
@@ -1367,30 +1424,37 @@ class PgIndexStore(_StoreSharedMixin):
         path_pattern: str,
         sample_count: int,
         status: str = "pending",
+        evidence_prs: str = "",
     ) -> LearnedRuleRow:
+        from mira.index.store import _merge_evidence_prs
+
         now = time.time()
         existing = self._fetchone(
-            "SELECT id, status FROM learned_rules WHERE owner=%s AND repo=%s "
-            "AND category=%s AND path_pattern=%s",
+            "SELECT id, status, rule_text, evidence_prs FROM learned_rules "
+            "WHERE owner=%s AND repo=%s AND category=%s AND path_pattern=%s",
             (self._owner, self._repo, category, path_pattern),
         )
         if existing:
-            # Preserve the existing approval status across re-synthesis.
+            # Preserve approval status. Freeze rule_text once approved/rejected.
+            existing_status = existing[1]
+            keep_text = existing[2] if existing_status in ("approved", "rejected") else rule_text
+            merged_evidence = _merge_evidence_prs(str(existing[3] or ""), evidence_prs)
             with self._cursor() as cur:
                 cur.execute(
                     "UPDATE learned_rules SET rule_text=%s, source_signal=%s, "
-                    "sample_count=%s, updated_at=%s WHERE id=%s",
-                    (rule_text, source_signal, sample_count, now, existing[0]),
+                    "sample_count=%s, evidence_prs=%s, updated_at=%s WHERE id=%s",
+                    (keep_text, source_signal, sample_count, merged_evidence, now, existing[0]),
                 )
             self._commit()
             return LearnedRuleRow(
                 id=existing[0],
-                rule_text=rule_text,
+                rule_text=keep_text,
                 source_signal=source_signal,
                 category=category,
                 path_pattern=path_pattern,
                 sample_count=sample_count,
-                status=existing[1],
+                status=existing_status,
+                evidence_prs=merged_evidence,
                 created_at=now,
                 updated_at=now,
             )
@@ -1398,8 +1462,8 @@ class PgIndexStore(_StoreSharedMixin):
             cur.execute(
                 "INSERT INTO learned_rules "
                 "(owner, repo, rule_text, source_signal, category, path_pattern, "
-                "sample_count, active, status, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s) RETURNING id",
+                "sample_count, active, status, evidence_prs, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s, %s) RETURNING id",
                 (
                     self._owner,
                     self._repo,
@@ -1409,6 +1473,7 @@ class PgIndexStore(_StoreSharedMixin):
                     path_pattern,
                     sample_count,
                     status,
+                    evidence_prs,
                     now,
                     now,
                 ),
@@ -1423,16 +1488,49 @@ class PgIndexStore(_StoreSharedMixin):
             path_pattern=path_pattern,
             sample_count=sample_count,
             status=status,
+            evidence_prs=evidence_prs,
             created_at=now,
             updated_at=now,
         )
 
     _LR_COLS = (
         "id, rule_text, source_signal, category, path_pattern, "
-        "sample_count, active, status, created_by, created_at, updated_at"
+        "sample_count, active, status, created_by, evidence_prs, group_id, "
+        "created_at, updated_at"
     )
 
     def _row_to_learned_rule(self, r: tuple) -> LearnedRuleRow:
+        if len(r) >= 13:
+            return LearnedRuleRow(
+                id=r[0],
+                rule_text=r[1],
+                source_signal=r[2],
+                category=r[3],
+                path_pattern=r[4],
+                sample_count=r[5],
+                active=bool(r[6]),
+                status=r[7],
+                created_by=r[8],
+                evidence_prs=r[9] or "",
+                group_id=r[10] or "",
+                created_at=r[11],
+                updated_at=r[12],
+            )
+        if len(r) >= 12:
+            return LearnedRuleRow(
+                id=r[0],
+                rule_text=r[1],
+                source_signal=r[2],
+                category=r[3],
+                path_pattern=r[4],
+                sample_count=r[5],
+                active=bool(r[6]),
+                status=r[7],
+                created_by=r[8],
+                evidence_prs=r[9] or "",
+                created_at=r[10],
+                updated_at=r[11],
+            )
         return LearnedRuleRow(
             id=r[0],
             rule_text=r[1],
@@ -1451,6 +1549,7 @@ class PgIndexStore(_StoreSharedMixin):
         rows = self._fetchall(
             f"SELECT {self._LR_COLS} FROM learned_rules "
             "WHERE owner=%s AND repo=%s AND active=1 AND status='approved' "
+            "AND source_signal != 'accept_pattern' "
             "ORDER BY sample_count DESC",
             (self._owner, self._repo),
         )
@@ -1487,14 +1586,19 @@ class PgIndexStore(_StoreSharedMixin):
         status: str = "approved",
         active: bool = True,
         created_by: str = "",
+        group_id: str = "",
+        evidence_prs: str = "",
+        sample_count: int = 0,
     ) -> LearnedRuleRow:
         now = time.time()
         with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO learned_rules "
                 "(owner, repo, rule_text, source_signal, category, path_pattern, "
-                "sample_count, active, status, created_by, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s) RETURNING id",
+                "sample_count, active, status, created_by, evidence_prs, group_id, "
+                "created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "RETURNING id",
                 (
                     self._owner,
                     self._repo,
@@ -1502,9 +1606,12 @@ class PgIndexStore(_StoreSharedMixin):
                     source_signal,
                     category,
                     path_pattern,
+                    sample_count,
                     int(active),
                     status,
                     created_by,
+                    evidence_prs,
+                    group_id,
                     now,
                     now,
                 ),
@@ -1514,15 +1621,103 @@ class PgIndexStore(_StoreSharedMixin):
         return self.get_learned_rule(row_id)  # type: ignore[return-value]
 
     def update_learned_rule(
-        self, rule_id: int, rule_text: str, category: str, path_pattern: str
+        self,
+        rule_id: int,
+        rule_text: str,
+        category: str,
+        path_pattern: str,
+        group_id: str | None = None,
     ) -> None:
         with self._cursor() as cur:
+            if group_id is None:
+                cur.execute(
+                    "UPDATE learned_rules SET rule_text=%s, category=%s, path_pattern=%s, "
+                    "updated_at=%s WHERE id=%s AND owner=%s AND repo=%s",
+                    (
+                        rule_text,
+                        category,
+                        path_pattern,
+                        time.time(),
+                        rule_id,
+                        self._owner,
+                        self._repo,
+                    ),
+                )
+            else:
+                cur.execute(
+                    "UPDATE learned_rules SET rule_text=%s, category=%s, path_pattern=%s, "
+                    "group_id=%s, updated_at=%s WHERE id=%s AND owner=%s AND repo=%s",
+                    (
+                        rule_text,
+                        category,
+                        path_pattern,
+                        group_id,
+                        time.time(),
+                        rule_id,
+                        self._owner,
+                        self._repo,
+                    ),
+                )
+        self._commit()
+
+    def set_learned_rule_group_id(self, rule_id: int, group_id: str) -> None:
+        with self._cursor() as cur:
             cur.execute(
-                "UPDATE learned_rules SET rule_text=%s, category=%s, path_pattern=%s, "
-                "updated_at=%s WHERE id=%s AND owner=%s AND repo=%s",
-                (rule_text, category, path_pattern, time.time(), rule_id, self._owner, self._repo),
+                "UPDATE learned_rules SET group_id=%s, updated_at=%s "
+                "WHERE id=%s AND owner=%s AND repo=%s",
+                (group_id, time.time(), rule_id, self._owner, self._repo),
             )
         self._commit()
+
+    def bump_learned_rule_evidence(
+        self,
+        rule_id: int,
+        sample_count: int,
+        rule_text: str | None = None,
+        evidence_prs: str = "",
+        *,
+        replace_evidence: bool = False,
+    ) -> LearnedRuleRow | None:
+        """Bump sample_count; rewrite rule_text only while status is pending."""
+        from mira.index.store import _merge_evidence_prs
+
+        existing = self.get_learned_rule(rule_id)
+        if existing is None:
+            return None
+        now = time.time()
+        if existing.status == "pending" and rule_text and rule_text.strip():
+            keep_text = rule_text.strip()
+        else:
+            keep_text = existing.rule_text
+        if replace_evidence and evidence_prs:
+            merged_evidence = _merge_evidence_prs("", evidence_prs)
+        else:
+            merged_evidence = _merge_evidence_prs(existing.evidence_prs, evidence_prs)
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE learned_rules SET rule_text=%s, sample_count=%s, evidence_prs=%s, "
+                "updated_at=%s WHERE id=%s AND owner=%s AND repo=%s",
+                (
+                    keep_text,
+                    sample_count,
+                    merged_evidence,
+                    now,
+                    rule_id,
+                    self._owner,
+                    self._repo,
+                ),
+            )
+        self._commit()
+        return self.get_learned_rule(rule_id)
+
+    def last_feedback_signal_at(self, signal: str) -> float:
+        """Newest ``created_at`` for a feedback signal, or 0 if none."""
+        row = self._fetchone(
+            "SELECT created_at FROM feedback_events WHERE owner=%s AND repo=%s "
+            "AND signal=%s ORDER BY created_at DESC LIMIT 1",
+            (self._owner, self._repo, signal),
+        )
+        return float(row[0]) if row else 0.0
 
     def set_learned_rule_status(self, rule_id: int, status: str) -> None:
         with self._cursor() as cur:

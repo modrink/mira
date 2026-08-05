@@ -53,6 +53,11 @@ class _StoreSharedMixin:
             parts.append(f"### {entry.title}\n{entry.content}\n")
         return "\n".join(parts)
 
-    def get_learned_rules_text(self) -> list[str]:
+    def get_learned_rules_text(self, file_paths: list[str] | None = None) -> list[str]:
+        # Hand / global rules are injected separately and outrank these.
+        # Path-scoped rules only inject when ``file_paths`` intersects the glob;
+        # internal ``__human_*__`` keys and empty patterns apply everywhere.
+        from mira.analysis.learned_rules import select_learned_rule_texts
+
         rules = self.list_active_learned_rules()  # type: ignore[attr-defined]
-        return [r.rule_text for r in rules[:10]]
+        return select_learned_rule_texts(rules, file_paths)

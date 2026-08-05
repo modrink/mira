@@ -167,6 +167,38 @@ def test_creator_can_edit_own_pending(patched_db: AppDatabase):
     store.close()
 
 
+def test_creator_can_delete_own_pending(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    created = rules.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="scratch", category="style"),
+        _Req(is_admin=False, username="junior"),
+    )
+    rules.delete_learned_rule("acme", "web", created.id, _Req(is_admin=False, username="junior"))
+    store = IndexStore.open("acme", "web")
+    assert store.get_learned_rule(created.id) is None
+    store.close()
+
+
+def test_other_non_admin_cannot_delete_pending(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    created = rules.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="scratch", category="style"),
+        _Req(is_admin=False, username="junior"),
+    )
+    with pytest.raises(HTTPException) as exc:
+        rules.delete_learned_rule(
+            "acme",
+            "web",
+            created.id,
+            _Req(is_admin=False, username="someone-else"),
+        )
+    assert exc.value.status_code == 403
+
+
 def test_other_non_admin_cannot_edit(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
     created = rules.create_learned_rule(
@@ -259,4 +291,25 @@ def test_admin_can_edit_anyones_rule(patched_db: AppDatabase):
     )
     store = IndexStore.open("acme", "web")
     assert store.get_learned_rule(created.id).rule_text == "admin edited"
+    store.close()
+
+
+def test_create_near_dupe_reinforces_existing(patched_db: AppDatabase):
+    patched_db.register_repo("acme", "web")
+    first = rules.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="Prefer Alpine base images", category="style"),
+        _Req(is_admin=True, username="boss"),
+    )
+    second = rules.create_learned_rule(
+        "acme",
+        "web",
+        api.LearnedRuleInput(rule_text="Prefer Alpine base images", category="style"),
+        _Req(is_admin=True, username="boss"),
+    )
+    assert second.id == first.id
+    assert second.sample_count > first.sample_count
+    store = IndexStore.open("acme", "web")
+    assert len(store.list_learned_rules()) == 1
     store.close()

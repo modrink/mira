@@ -4,14 +4,60 @@ LLM-powered human-review synthesis, and webhook routing of merged PRs."""
 from __future__ import annotations
 
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mira.analysis.feedback import synthesize_from_human_reviews, synthesize_rules
-from mira.index.store import IndexStore
+from mira.analysis.feedback import (
+    _select_human_comments_for_synth,
+    llm_synth_cooldown_elapsed,
+    mark_llm_synth,
+    pack_human_comment_for_learning,
+    synthesize_from_human_reviews,
+    synthesize_rules,
+)
+from mira.index.store import FeedbackEventRow, IndexStore
 from mira.models import BotThreadRecord, HumanReviewComment
 from mira.providers.github import parse_bot_comment_metadata
+
+
+def _staged_llm_complete(cluster_payload: dict | str):
+    """Mock llm.complete for classify → extract → cluster."""
+    cluster_json = (
+        cluster_payload if isinstance(cluster_payload, str) else json.dumps(cluster_payload)
+    )
+
+    async def _complete(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        if "classifying human code-review comments" in prompt:
+            idxs = [int(m) for m in re.findall(r"^### (\d+) —", prompt, re.M)]
+            return json.dumps({"results": [{"index": i, "decision": "EXTRACT"} for i in idxs]})
+        if (
+            "extract one titled coding rule" in prompt
+            or "extract one structured coding rule" in prompt
+        ):
+            idxs = [int(m) for m in re.findall(r"^### (\d+) —", prompt, re.M)]
+            return json.dumps(
+                {
+                    "extractions": [
+                        {
+                            "index": idx,
+                            "title": "Apply the team pattern",
+                            "body": (
+                                "Follow the rejected approach replacement called out in review.\n\n"
+                                "Look for: the rejected approach in new application code"
+                            ),
+                            "path_hint": "",
+                            "prs": [],
+                        }
+                        for idx in idxs
+                    ]
+                }
+            )
+        return cluster_json
+
+    return _complete
 
 
 @pytest.fixture
@@ -19,6 +65,146 @@ def store(tmp_path):
     s = IndexStore(str(tmp_path / "t.db"))
     yield s
     s.close()
+
+
+def _human_ev(
+    *,
+    id: int,
+    pr_number: int,
+    created_at: float,
+    title: str = "review note",
+) -> FeedbackEventRow:
+    return FeedbackEventRow(
+        id=id,
+        pr_number=pr_number,
+        pr_url=f"https://x/{pr_number}",
+        comment_path="a.py",
+        comment_line=1,
+        comment_category="human_review",
+        comment_severity="",
+        comment_title=title,
+        signal="human_review",
+        actor="alice",
+        created_at=created_at,
+    )
+
+
+# Simulated bulk-backfill ingest skew: newest PRs ingested first → older
+# created_at; last-written small/old PRs get newest timestamps.
+_BACKFILL_SKEW: list[tuple[int, int]] = [
+    (101, 22),
+    (102, 15),
+    (103, 5),
+    (104, 4),
+    (105, 73),
+    (106, 9),
+    (107, 12),
+    (108, 2),
+    (109, 1),
+    (110, 2),
+    (111, 3),
+]
+
+
+def _skewed_backfill_events() -> list[FeedbackEventRow]:
+    """Simulate bulk backfill: one created_at per PR, ingest order = list order."""
+    events: list[FeedbackEventRow] = []
+    next_id = 1
+    base_ts = 1_000_000.0
+    for batch_i, (pr, n) in enumerate(_BACKFILL_SKEW):
+        ts = base_ts + batch_i  # later batches = higher created_at (written last)
+        for j in range(n):
+            events.append(
+                _human_ev(
+                    id=next_id,
+                    pr_number=pr,
+                    created_at=ts,
+                    title=f"pr{pr}-c{j}",
+                )
+            )
+            next_id += 1
+    return events
+
+
+class TestSelectHumanCommentsForSynth:
+    def test_skewed_ingest_order_old_slice_excludes_fat_early_prs(self):
+        events = _skewed_backfill_events()
+        # Old behaviour: list_feedback ORDER BY created_at DESC, take [:50].
+        newest_first = sorted(
+            [e for e in events if e.signal == "human_review"],
+            key=lambda e: (e.created_at, e.id),
+            reverse=True,
+        )
+        old_window = newest_first[:50]
+        old_prs = {e.pr_number for e in old_window}
+        assert 101 not in old_prs
+        assert 102 not in old_prs
+
+    def test_stratify_includes_fat_early_prs(self):
+        events = _skewed_backfill_events()
+        selected = _select_human_comments_for_synth(events, limit=100)
+        prs = {e.pr_number for e in selected}
+        assert 101 in prs
+        assert 102 in prs
+        assert 105 in prs
+        assert len(selected) == 100
+        # Round-robin: no single PR should own the whole window.
+        from collections import Counter
+
+        counts = Counter(e.pr_number for e in selected)
+        assert max(counts.values()) < 100
+        # Every PR with comments gets at least one slot when limit >= n_prs.
+        assert prs == {pr for pr, _ in _BACKFILL_SKEW}
+
+    def test_ignores_non_human_signals(self):
+        events = [
+            _human_ev(id=1, pr_number=1, created_at=1.0),
+            FeedbackEventRow(
+                id=2,
+                pr_number=1,
+                pr_url="https://x/1",
+                comment_path="a.py",
+                comment_line=2,
+                comment_category="bug",
+                comment_severity="warning",
+                comment_title="bot",
+                signal="accepted",
+                actor="bot",
+                created_at=2.0,
+            ),
+            _human_ev(id=3, pr_number=2, created_at=3.0),
+        ]
+        selected = _select_human_comments_for_synth(events, limit=10)
+        assert len(selected) == 2
+        assert all(e.signal == "human_review" for e in selected)
+
+    def test_prefers_hunk_bearing_comments_within_pr(self):
+
+        plain = _human_ev(id=1, pr_number=1, created_at=1.0, title="no hunk first")
+        with_hunk = _human_ev(
+            id=2,
+            pr_number=1,
+            created_at=1.0,
+            title=pack_human_comment_for_learning(
+                "prefer Http client",
+                "@@ -1 +1 @@\n-curl\n+Http::get",
+            ),
+        )
+        other_pr = _human_ev(id=3, pr_number=2, created_at=2.0, title="other")
+        selected = _select_human_comments_for_synth(
+            [plain, with_hunk, other_pr],
+            limit=2,
+        )
+        # Round-robin across PRs still; within PR 1 hunk sorts first so id=2 before id=1
+        # when both from same PR would be taken — take limit 3 to see order within PR1.
+        selected3 = _select_human_comments_for_synth(
+            [plain, with_hunk, other_pr],
+            limit=3,
+        )
+        pr1 = [e for e in selected3 if e.pr_number == 1]
+        assert pr1[0].id == 2
+        assert pr1[1].id == 1
+        assert len(selected) == 2
 
 
 # ── parse_bot_comment_metadata ──
@@ -149,42 +335,51 @@ class TestSynthesizeRules:
         rules = store.list_learned_rules()
         assert any(r.source_signal == "reject_pattern" for r in rules)
 
-    def test_positive_rule_on_high_accept_rate(self, store):
-        # 5 accepted, 0 rejected → 100% acceptance in a category
+    def test_high_accept_rate_does_not_create_accept_pattern(self, store):
+        # Accept signals are recorded for analytics but no longer become rules.
         for i in range(5):
             _fb(store, signal="accepted", category="bug", pr=i)
         n = synthesize_rules(store)
-        assert n >= 1
-        rules = store.list_learned_rules()
-        assert any(r.source_signal == "accept_pattern" and r.category == "bug" for r in rules)
-
-    def test_low_accept_rate_no_positive_rule(self, store):
-        # 3 accepted + 3 rejected = 50% accept rate → no positive rule
-        for i in range(3):
-            _fb(store, signal="accepted", category="clarity", pr=i)
-        for i in range(3, 6):
-            _fb(store, signal="rejected", category="clarity", pr=i)
-        synthesize_rules(store)
+        assert n == 0
         rules = store.list_learned_rules()
         assert not any(r.source_signal == "accept_pattern" for r in rules)
 
-    def test_reject_pattern_suppresses_accept_rule(self, store):
-        # 5 rejects triggers a category-wide reject rule; accepts should be
-        # suppressed to avoid mixed signals.
+    def test_reject_pattern_still_created_with_accepts_present(self, store):
         for i in range(5):
             _fb(store, signal="rejected", category="style", pr=i)
         for i in range(5, 15):
             _fb(store, signal="accepted", category="style", pr=i)
         synthesize_rules(store)
         rules = store.list_learned_rules()
-        # Only the reject_pattern rule should exist for this category.
         style_rules = [r for r in rules if r.category == "style"]
+        assert style_rules
         assert all(r.source_signal == "reject_pattern" for r in style_rules)
 
     def test_ignores_unknown_category(self, store):
         for i in range(5):
             _fb(store, signal="rejected", category="", pr=i)
         assert synthesize_rules(store) == 0
+
+    def test_reject_pattern_stores_evidence_prs(self, store):
+        for i in range(5):
+            _fb(store, signal="rejected", category="style", pr=10 + i)
+        assert synthesize_rules(store) >= 1
+        rules = [r for r in store.list_learned_rules() if r.source_signal == "reject_pattern"]
+        assert rules
+        evidence = {n for r in rules for n in (r.evidence_prs or "").split(",") if n}
+        assert evidence >= {"10", "11", "12", "13", "14"}
+
+
+class TestLlmSynthCooldown:
+    def test_elapsed_when_never_ran(self, store):
+        assert llm_synth_cooldown_elapsed(store) is True
+
+    def test_blocked_immediately_after_mark(self, store):
+        mark_llm_synth(store)
+        last = store.last_feedback_signal_at("learn_synth")
+        assert last > 0
+        assert llm_synth_cooldown_elapsed(store, now=last + 10) is False
+        assert llm_synth_cooldown_elapsed(store, now=last + 4000) is True
 
 
 # ── synthesize_from_human_reviews (LLM) ──
@@ -204,8 +399,8 @@ class TestSynthesizeFromHumanReviews:
         # Seed with 3 human-review events
         for i in range(3):
             store.record_feedback(
-                pr_number=i,
-                pr_url=f"https://x/{i}",
+                pr_number=i + 1,
+                pr_url=f"https://x/{i + 1}",
                 comment_path=f"src/f{i}.py",
                 comment_line=10,
                 comment_category="human_review",
@@ -216,18 +411,22 @@ class TestSynthesizeFromHumanReviews:
             )
 
         llm = AsyncMock()
-        llm.complete.return_value = json.dumps(
+        llm.complete.side_effect = _staged_llm_complete(
             {
-                "rules": [
+                "actions": [
                     {
+                        "action": "create",
                         "rule": "Flag raw SQL queries outside the data layer.",
                         "rationale": "Reviewers consistently pushed back on them.",
                         "evidence_count": 3,
+                        "prs": [1, 2, 99],
                     },
                     {
+                        "action": "create",
                         "rule": "Prefer async/await over callback patterns.",
                         "rationale": "Team style.",
                         "evidence_count": 2,
+                        "prs": [3],
                     },
                 ]
             }
@@ -235,11 +434,425 @@ class TestSynthesizeFromHumanReviews:
 
         n = await synthesize_from_human_reviews(store, llm)
         assert n == 2
-        llm.complete.assert_called_once()
+        assert llm.complete.await_count >= 3
         # Verify stored as human_pattern source
         rules = store.list_learned_rules()
         human_rules = [r for r in rules if r.source_signal == "human_pattern"]
         assert len(human_rules) == 2
+        assert all(r.path_pattern.startswith("__human_") for r in human_rules)
+        # Rationale must not be glued into rule_text.
+        assert all("(" not in r.rule_text for r in human_rules)
+        # Evidence PRs are per-action (validated against batch), not the whole window.
+        by_text = {r.rule_text: r for r in human_rules}
+        sql = by_text["Flag raw SQL queries outside the data layer."]
+        assert sql.evidence_prs == "1,2"
+        assert sql.sample_count == 3
+        async_rule = by_text["Prefer async/await over callback patterns."]
+        assert async_rule.evidence_prs == "3"
+        assert async_rule.sample_count == 2
+        # Cluster prompt includes catalog; classify/extract include PR markers.
+        prompts = [c.kwargs["messages"][0]["content"] for c in llm.complete.await_args_list]
+        assert any("Existing catalog" in p for p in prompts)
+        assert any("PR #" in p for p in prompts)
+
+    @pytest.mark.asyncio
+    async def test_on_progress_emits_classify_extract_cluster(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i + 1,
+                pr_url=f"https://x/{i + 1}",
+                comment_path=f"src/f{i}.py",
+                comment_line=10,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"Please avoid bare except #{i}",
+                signal="human_review",
+                actor="alice",
+            )
+
+        phases: list[str] = []
+
+        def on_progress(fields: dict) -> None:
+            phase = str(fields.get("phase") or "")
+            if phase and (not phases or phases[-1] != phase):
+                phases.append(phase)
+
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {
+                "actions": [
+                    {
+                        "action": "create",
+                        "title": "Catch specific exceptions",
+                        "body": (
+                            "Prefer named exception types over bare except.\n\n"
+                            "Look for: bare except clauses"
+                        ),
+                        "evidence_count": 3,
+                        "prs": [1, 2, 3],
+                    }
+                ]
+            }
+        )
+        n = await synthesize_from_human_reviews(store, llm, on_progress=on_progress)
+        assert n == 1
+        assert "classify" in phases
+        assert "extract" in phases
+        assert "cluster" in phases
+        assert phases[-1] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_structured_title_body_pack_into_rule_text(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i + 1,
+                pr_url=f"https://x/{i + 1}",
+                comment_path=f"src/f{i}.py",
+                comment_line=10,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"please use transactions for multi writes #{i}",
+                signal="human_review",
+                actor="alice",
+            )
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {
+                "actions": [
+                    {
+                        "action": "create",
+                        "title": "Wrap multi-write requests in a transaction",
+                        "body": (
+                            "Wrap related DB writes in a single transaction instead of "
+                            "partial commits.\n\n"
+                            "Look for: multi-write requests without a transaction"
+                        ),
+                        "evidence_count": 3,
+                        "prs": [1, 2],
+                    },
+                    {
+                        "action": "create",
+                        "title": "Use camelCase for consistency",
+                        "body": "Prefer camelCase.\n\nLook for: snake_case names",
+                        "evidence_count": 2,
+                    },
+                ]
+            }
+        )
+        n = await synthesize_from_human_reviews(store, llm)
+        assert n == 1
+        human = [r for r in store.list_learned_rules() if r.source_signal == "human_pattern"]
+        assert len(human) == 1
+        assert "Wrap multi-write requests in a transaction" in human[0].rule_text
+        assert "Look for: multi-write requests without a transaction" in human[0].rule_text
+        prompts = [c.kwargs["messages"][0]["content"] for c in llm.complete.await_args_list]
+        assert any('"title"' in p for p in prompts)
+        assert any('"body"' in p for p in prompts)
+
+    @pytest.mark.asyncio
+    async def test_new_synth_adds_rules_without_overwriting_approved(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i,
+                pr_url=f"https://x/{i}",
+                comment_path=f"src/f{i}.py",
+                comment_line=10,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"note {i}",
+                signal="human_review",
+                actor="alice",
+            )
+        # Legacy slot-style approved rule must stay untouched.
+        approved = store.upsert_learned_rule(
+            rule_text="Keep using approved rule text forever.",
+            source_signal="human_pattern",
+            category="human_review",
+            path_pattern="__llm_pattern_0__",
+            sample_count=10,
+            status="approved",
+        )
+        assert approved.status == "approved"
+
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {
+                "actions": [
+                    {
+                        "action": "create",
+                        "rule": "Brand new research finding about logging.",
+                        "rationale": "Seen across PRs.",
+                        "evidence_count": 4,
+                    },
+                    {
+                        "action": "create",
+                        "rule": "Another distinct finding about retries.",
+                        "rationale": "Repeated feedback.",
+                        "evidence_count": 3,
+                    },
+                ]
+            }
+        )
+        n = await synthesize_from_human_reviews(store, llm)
+        assert n == 2
+
+        rules = store.list_learned_rules()
+        human = [r for r in rules if r.source_signal == "human_pattern"]
+        assert len(human) == 3
+        kept = store.get_learned_rule(approved.id)
+        assert kept is not None
+        assert kept.rule_text == "Keep using approved rule text forever."
+        assert kept.status == "approved"
+        pending = [r for r in human if r.status == "pending"]
+        assert len(pending) == 2
+        assert all(r.path_pattern.startswith("__human_") for r in pending)
+        prompts = [c.kwargs["messages"][0]["content"] for c in llm.complete.await_args_list]
+        assert any(f"id={approved.id}" in p for p in prompts)
+
+    @pytest.mark.asyncio
+    async def test_same_wording_reuses_row_and_bumps_samples(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i,
+                pr_url=f"https://x/{i}",
+                comment_path="a.py",
+                comment_line=1,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"c{i}",
+                signal="human_review",
+                actor="u",
+            )
+        payload = {
+            "actions": [
+                {
+                    "action": "create",
+                    "rule": "Prefer named constants over magic numbers.",
+                    "rationale": "Reviewers asked for it.",
+                    "evidence_count": 2,
+                }
+            ]
+        }
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(payload)
+        assert await synthesize_from_human_reviews(store, llm) == 1
+        first = [r for r in store.list_learned_rules() if r.source_signal == "human_pattern"]
+        assert len(first) == 1
+        path = first[0].path_pattern
+        llm.complete.side_effect = _staged_llm_complete(payload)
+        assert await synthesize_from_human_reviews(store, llm) == 1
+        again = [r for r in store.list_learned_rules() if r.source_signal == "human_pattern"]
+        assert len(again) == 1
+        assert again[0].path_pattern == path
+
+    @pytest.mark.asyncio
+    async def test_merge_bumps_approved_without_rewriting_text(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i,
+                pr_url=f"https://x/{i}",
+                comment_path="a.py",
+                comment_line=1,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"c{i}",
+                signal="human_review",
+                actor="u",
+            )
+        approved = store.upsert_learned_rule(
+            rule_text="Always validate auth tokens at the edge.",
+            source_signal="human_pattern",
+            category="human_review",
+            path_pattern="__human_abc__",
+            sample_count=2,
+            status="approved",
+        )
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {
+                "actions": [
+                    {
+                        "action": "merge",
+                        "target_id": approved.id,
+                        "rule": "Should not overwrite approved text.",
+                        "evidence_count": 9,
+                    }
+                ]
+            }
+        )
+        assert await synthesize_from_human_reviews(store, llm) == 1
+        kept = store.get_learned_rule(approved.id)
+        assert kept is not None
+        assert kept.rule_text == "Always validate auth tokens at the edge."
+        assert kept.sample_count == 9
+        assert kept.status == "approved"
+
+    @pytest.mark.asyncio
+    async def test_merge_can_rewrite_pending_text(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i,
+                pr_url=f"https://x/{i}",
+                comment_path="a.py",
+                comment_line=1,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"c{i}",
+                signal="human_review",
+                actor="u",
+            )
+        pending = store.upsert_learned_rule(
+            rule_text="Old pending wording.",
+            source_signal="human_pattern",
+            category="human_review",
+            path_pattern="__human_pending__",
+            sample_count=1,
+            status="pending",
+        )
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {
+                "actions": [
+                    {
+                        "action": "merge",
+                        "target_id": pending.id,
+                        "rule": "Improved pending wording.",
+                        "evidence_count": 4,
+                    }
+                ]
+            }
+        )
+        assert await synthesize_from_human_reviews(store, llm) == 1
+        got = store.get_learned_rule(pending.id)
+        assert got is not None
+        assert got.rule_text == "Improved pending wording."
+        assert got.sample_count == 4
+        assert got.status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_skip_actions_do_not_upsert(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i,
+                pr_url=f"https://x/{i}",
+                comment_path="a.py",
+                comment_line=1,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"c{i}",
+                signal="human_review",
+                actor="u",
+            )
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {"actions": [{"action": "skip", "note": "already covered"}]}
+        )
+        assert await synthesize_from_human_reviews(store, llm) == 0
+        assert store.list_learned_rules() == []
+
+    @pytest.mark.asyncio
+    async def test_replace_pending_clears_auto_synth_keeps_remember(self, store):
+        from mira.analysis.feedback import clear_pending_synth_rules
+
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i,
+                pr_url=f"https://x/{i}",
+                comment_path="a.py",
+                comment_line=1,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"c{i}",
+                signal="human_review",
+                actor="u",
+            )
+        auto = store.upsert_learned_rule(
+            rule_text="Auto pending mush.",
+            source_signal="human_pattern",
+            category="human_review",
+            path_pattern="__human_auto__",
+            sample_count=1,
+            status="pending",
+        )
+        remember = store.create_learned_rule(
+            rule_text="Hand remember rule.",
+            source_signal="human_pattern",
+            category="other",
+            path_pattern="",
+            sample_count=1,
+            status="pending",
+            created_by="alice",
+        )
+        cleared = clear_pending_synth_rules(store)
+        assert cleared == 1
+        assert store.get_learned_rule(auto.id) is None
+        assert store.get_learned_rule(remember.id) is not None
+
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {
+                "actions": [
+                    {
+                        "action": "create",
+                        "title": "Flag bare except",
+                        "body": (
+                            "Catch named exceptions instead of bare except.\n\n"
+                            "Look for: bare except clauses"
+                        ),
+                        "evidence_count": 2,
+                    }
+                ]
+            }
+        )
+        n = await synthesize_from_human_reviews(store, llm, replace_pending=True)
+        assert n == 1
+        assert store.get_learned_rule(remember.id) is not None
+        human = [r for r in store.list_learned_rules() if r.source_signal == "human_pattern"]
+        assert any("Flag bare except" in r.rule_text for r in human)
+
+    @pytest.mark.asyncio
+    async def test_near_rejected_create_is_skipped(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i,
+                pr_url=f"https://x/{i}",
+                comment_path="a.py",
+                comment_line=1,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"c{i}",
+                signal="human_review",
+                actor="u",
+            )
+        rejected = store.upsert_learned_rule(
+            rule_text=(
+                "Flag bare except clauses\n\n"
+                "Catch named exceptions.\n\n"
+                "Look for: bare except clauses"
+            ),
+            source_signal="human_pattern",
+            category="human_review",
+            path_pattern="__human_rej__",
+            sample_count=1,
+            status="rejected",
+        )
+        assert rejected.status == "rejected"
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {
+                "actions": [
+                    {
+                        "action": "create",
+                        "title": "Flag bare except clauses",
+                        "body": ("Catch named exceptions.\n\nLook for: bare except clauses"),
+                        "evidence_count": 3,
+                    }
+                ]
+            }
+        )
+        assert await synthesize_from_human_reviews(store, llm) == 0
+        pending = [r for r in store.list_learned_rules() if r.status == "pending"]
+        assert pending == []
 
     @pytest.mark.asyncio
     async def test_bad_json_returns_zero(self, store):
@@ -256,6 +869,7 @@ class TestSynthesizeFromHumanReviews:
                 actor="u",
             )
         llm = AsyncMock()
+        # Classify fails JSON → no EXTRACT → zero upserts.
         llm.complete.return_value = "this is not json"
         assert await synthesize_from_human_reviews(store, llm) == 0
 
@@ -506,10 +1120,11 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
 
     fake_llm = MagicMock()
     fake_llm.complete = AsyncMock(
-        return_value=json.dumps(
+        side_effect=_staged_llm_complete(
             {
-                "rules": [
+                "actions": [
                     {
+                        "action": "create",
                         "rule": "Avoid raw SQL queries outside the data-access layer.",
                         "rationale": "Reviewers consistently push back on them.",
                         "evidence_count": 2,
@@ -565,8 +1180,8 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
     # Original rejected event still present and not duplicated.
     assert len(by_signal["rejected"]) == 1
 
-    # LLM was invoked exactly once for this merge.
-    fake_llm.complete.assert_called_once()
+    # LLM was invoked for staged synth (classify + extract + cluster).
+    assert fake_llm.complete.await_count >= 3
 
     # One human_pattern rule stored.
     rules = store.list_learned_rules()

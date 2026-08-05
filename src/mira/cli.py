@@ -516,3 +516,140 @@ def backfill_contributors(
             backfill_all_repos(app_auth, since=since_epoch, include_commits=include_commits)
         )
         click.echo(f"Backfill complete: {totals}")
+
+
+@main.command("backfill-learnings")
+@click.option(
+    "--repo",
+    "repo_spec",
+    default=None,
+    help="owner/repo to backfill. Omit to backfill every registered GitHub repo.",
+)
+@click.option("--app-id", envvar="MIRA_GITHUB_APP_ID", required=True, help="GitHub App ID")
+@click.option(
+    "--private-key",
+    envvar="MIRA_GITHUB_PRIVATE_KEY",
+    required=True,
+    help="PEM contents or @path/to/key.pem",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="Only merged PRs on/after this ISO date (e.g. 2024-01-01).",
+)
+@click.option(
+    "--max-prs",
+    default=100,
+    show_default=True,
+    type=int,
+    help="Max merged PRs to scan per repo (newest first).",
+)
+@click.option("--verbose", is_flag=True, help="Enable verbose logging")
+def backfill_learnings(
+    repo_spec: str | None,
+    app_id: str,
+    private_key: str,
+    since: str | None,
+    max_prs: int,
+    verbose: bool,
+) -> None:
+    """Backfill learnings from historical merged PR review comments (GitHub)."""
+    from datetime import datetime
+
+    from mira.platforms.github.auth import GitHubAppAuth
+    from mira.platforms.github.learning_backfill import (
+        backfill_all_repos,
+        backfill_repo_learnings,
+    )
+
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(name)s %(levelname)s: %(message)s",
+        stream=sys.stdout,
+    )
+
+    if private_key.startswith("@"):
+        key_path = private_key[1:]
+        try:
+            with open(key_path) as f:
+                private_key = f.read()
+        except FileNotFoundError:
+            raise click.ClickException(f"Private key file not found: {key_path}") from None
+
+    app_auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
+
+    since_epoch: float | None = None
+    if since:
+        try:
+            since_epoch = datetime.fromisoformat(since).replace(tzinfo=UTC).timestamp()
+        except ValueError:
+            raise click.ClickException("--since must be an ISO date, e.g. 2024-01-01") from None
+
+    if max_prs < 1:
+        raise click.UsageError("--max-prs must be >= 1")
+
+    if repo_spec:
+        if "/" not in repo_spec:
+            raise click.UsageError("--repo must be in the form owner/repo")
+        owner, repo = repo_spec.split("/", 1)
+        counts = asyncio.run(
+            backfill_repo_learnings(owner, repo, app_auth, since=since_epoch, max_prs=max_prs)
+        )
+        click.echo(f"Learning backfill {owner}/{repo}: {counts}")
+    else:
+        totals = asyncio.run(backfill_all_repos(app_auth, since=since_epoch, max_prs=max_prs))
+        click.echo(f"Learning backfill complete: {totals}")
+
+
+@main.command("synthesize-learnings")
+@click.option(
+    "--repo",
+    "repo_spec",
+    default=None,
+    help="owner/repo to re-synthesize. Omit to run every registered repo.",
+)
+@click.option("--verbose", is_flag=True, help="Enable verbose logging")
+def synthesize_learnings_cmd(repo_spec: str | None, verbose: bool) -> None:
+    """Re-run catalog-aware learnings synthesis from stored feedback (no GitHub)."""
+    import os
+
+    from mira.dashboard.db import AppDatabase
+    from mira.platforms.handlers import synthesize_repo_learnings
+
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(name)s %(levelname)s: %(message)s",
+        stream=sys.stdout,
+    )
+
+    db = AppDatabase(os.environ.get("DATABASE_URL", ""))
+    try:
+        if repo_spec:
+            if "/" not in repo_spec:
+                raise click.UsageError("--repo must be in the form owner/repo")
+            owner, repo = repo_spec.split("/", 1)
+            matches = db.get_repo_any_platform(owner, repo)
+            platform = (
+                getattr(matches[0], "platform", "github") or "github" if matches else "github"
+            )
+            counts = asyncio.run(synthesize_repo_learnings(owner, repo, platform=platform))
+            click.echo(f"Synthesize {owner}/{repo}: {counts}")
+        else:
+            totals = {"deterministic_rules": 0, "llm_rules": 0, "repos": 0}
+            repos = list(db.list_repos())
+            if not repos:
+                raise click.ClickException("No registered repos — pass --repo owner/repo")
+            for rec in repos:
+                counts = asyncio.run(
+                    synthesize_repo_learnings(
+                        rec.owner,
+                        rec.repo,
+                        platform=getattr(rec, "platform", "github") or "github",
+                    )
+                )
+                totals["deterministic_rules"] += counts.get("deterministic_rules", 0)
+                totals["llm_rules"] += counts.get("llm_rules", 0)
+                totals["repos"] += 1
+            click.echo(f"Synthesize complete: {totals}")
+    finally:
+        db.close()

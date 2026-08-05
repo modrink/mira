@@ -1020,6 +1020,7 @@ class GitHubProvider(BaseProvider):
                         line=(c.line or c.original_line or 0),
                         body=c.body or "",
                         author=author,
+                        diff_hunk=getattr(c, "diff_hunk", None) or "",
                     )
                 )
             return results

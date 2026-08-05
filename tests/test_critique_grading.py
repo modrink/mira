@@ -169,3 +169,64 @@ class TestEvidenceGradedCritique:
 
         assert kept == []
         assert audit[0]["reason"].startswith("no-verdict:")
+
+
+@pytest.mark.asyncio
+async def test_path_scoped_learned_rows_only_on_matching_comment(monkeypatch):
+    from types import SimpleNamespace
+
+    comments = [
+        ReviewComment(
+            path="src/a.py",
+            line=1,
+            end_line=None,
+            severity=Severity.WARNING,
+            category="style",
+            title="src comment",
+            body="b",
+            confidence=0.9,
+        ),
+        ReviewComment(
+            path="tests/t.py",
+            line=1,
+            end_line=None,
+            severity=Severity.WARNING,
+            category="style",
+            title="test comment",
+            body="b",
+            confidence=0.9,
+        ),
+    ]
+    rows = [
+        SimpleNamespace(
+            rule_text="src-only preference",
+            path_pattern="src/**",
+            source_signal="reject_pattern",
+        )
+    ]
+    response = json.dumps(
+        {
+            "verdicts": [
+                {"index": 0, "evidence": "proven", "reason": "ok"},
+                {"index": 1, "evidence": "proven", "reason": "ok"},
+            ]
+        }
+    )
+    from mira.llm import provider as provider_mod
+
+    captured = {}
+
+    async def fake(self, messages, tools, temperature=None):
+        captured["prompt"] = messages[0]["content"]
+        return response
+
+    monkeypatch.setattr(provider_mod.LLMProvider, "complete_with_tools", fake)
+
+    await self_critique(AsyncMock(), comments, learned_rule_rows=rows)
+
+    # Preference appears under the src comment, not as a global dump for tests/.
+    assert "src-only preference" in captured["prompt"]
+    src_idx = captured["prompt"].index("[0] src/a.py")
+    test_idx = captured["prompt"].index("[1] tests/t.py")
+    pref_idx = captured["prompt"].index("src-only preference")
+    assert src_idx < pref_idx < test_idx

@@ -38,13 +38,14 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 - Per-repo custom rules with full CRUD (unlimited)
 - Global rules that apply to every repo in the org
 - Both inject into the review prompt automatically
-- Rules UI at `/rules` in the dashboard
+- Rules UI at `/rules` in the dashboard (Pending / Active; edit Scope = Global or selected repos)
 
 ## Learning from feedback
 
 - `@miracodeai reject` thread resolution with feedback-event recording
 - Deterministic rule synthesis from reject signals
 - LLM-powered synthesis of human review patterns from merged PRs (extracts recurring themes from human reviewer comments)
+- Historical learnings backfill: admin **Backfill** on Rules → Active (or `mira backfill-learnings`) replays merge-time learning over recent merged PRs
 - Feedback stats API for inspecting the learning loop
 - Synthesized rules inject into future reviews automatically
 

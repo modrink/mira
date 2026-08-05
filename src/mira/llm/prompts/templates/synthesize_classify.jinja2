@@ -1,0 +1,44 @@
+You are classifying human code-review comments for learnings extraction.
+
+Default to SKIP. EXTRACT only when the comment clearly rejects a concrete
+construct a future reviewer can spot in a diff (named smell + preferred alternative).
+
+EXTRACT requires:
+- a named smell (API, call shape, attribute, type, layering mistake), AND
+- guidance specific enough that a different PR could violate it
+
+SKIP when any of:
+- questions / LGTM / thanks / emoji / pure PR workflow
+- style or cleanup without a named detector ("remove unused", "follow conventions", "handle null", "large component")
+- maintainability slogans ("consider extracting", "use a trait", "move to SCSS", "for clarity/readability")
+- package / architecture lore not grounded in the comment text
+- preference so vague a review LLM would false-positive constantly
+- soft opinions with no hunk and no named token in the body
+
+When uncertain → SKIP. Prefer fewer high-quality EXTRACTs over many soft ones.
+Hunk present + named smell → EXTRACT. No-hunk → EXTRACT only if the body itself names the smell.
+
+Respond in JSON only. No markdown fences.
+
+{
+  "results": [
+    {"index": 1, "decision": "EXTRACT"},
+    {"index": 2, "decision": "SKIP", "note": "optional short reason"}
+  ]
+}
+
+Classify every comment index listed below. Use only EXTRACT or SKIP.
+
+## Comments
+
+{% for c in comments %}
+### {{ c.index }} — PR #{{ c.pr_number }} — {{ c.path }}:{{ c.line }} — @{{ c.author }}
+{{ c.body }}
+{% if c.code %}
+
+```
+{{ c.code }}
+```
+{% endif %}
+
+{% endfor %}

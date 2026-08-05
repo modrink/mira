@@ -1,7 +1,6 @@
 import {
   Activity,
   BookOpen,
-  Brain,
   ChevronRight,
   ChevronsUpDown,
   Database,
@@ -77,7 +76,6 @@ const navItems = [
   { to: "/vulnerabilities", icon: ShieldAlert, label: "Vulnerabilities" },
   { to: "/relationships", icon: GitFork, label: "Relationships" },
   { to: "/rules", icon: BookOpen, label: "Rules" },
-  { to: "/learnings", icon: Brain, label: "Learnings" },
   { to: "/users", icon: Users, label: "Users", adminOnly: true },
 ]
 
@@ -97,10 +95,10 @@ const PAGE_LABELS: Record<string, string> = {
   vulnerabilities: "Vulnerabilities",
   relationships: "Relationships",
   rules: "Rules",
-  learnings: "Learnings",
+  learnings: "Rules",
   settings: "Settings",
   users: "Users",
-  new: "New",
+  new: "Add",
   edit: "Edit",
   account: "Account",
   password: "Password",
@@ -154,6 +152,10 @@ function AppBreadcrumb() {
   const hrefFor = (i: number) => {
     if (parts[0] === "repos" && i === 1 && parts.length >= 3) {
       return `/repos?owner=${encodeURIComponent(parts[1])}`
+    }
+    // Form routes under /learnings/* or /rules/* map to Rules.
+    if ((parts[0] === "learnings" || parts[0] === "rules") && i === 0) {
+      return "/rules"
     }
     return `/${parts.slice(0, i + 1).join("/")}`
   }
@@ -258,7 +260,15 @@ export function DashboardLayout() {
                       tooltip={item.label}
                       className={navActive}
                     >
-                      <NavLink to={item.to} end={item.to === "/"}>
+                      <NavLink
+                        to={item.to}
+                        end={item.to === "/"}
+                        {...(item.to === "/rules" &&
+                        (location.pathname.startsWith("/learnings") ||
+                          location.pathname.startsWith("/rules/"))
+                          ? { "aria-current": "page" as const }
+                          : {})}
+                      >
                         <item.icon />
                         <span>{item.label}</span>
                       </NavLink>

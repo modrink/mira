@@ -11,13 +11,13 @@ import { ActivityPage } from "@/pages/activity"
 import { ContributorDetailPage } from "@/pages/contributor-detail"
 import { ContributorsPage } from "@/pages/contributors"
 import { DashboardPage } from "@/pages/dashboard"
-import { LearnedRulesPage } from "@/pages/learned-rules"
-import { LearningFormPage } from "@/pages/learning-form"
+import { LearningsFormRedirect, LearningsRedirect } from "@/pages/learnings-redirect"
 import { LoginPage } from "@/pages/login"
 import { PackagesPage } from "@/pages/packages"
 import { RepoDetailPage } from "@/pages/repo-detail"
 import { RelationshipsPage } from "@/pages/relationships"
 import { ReposPage } from "@/pages/repos"
+import { RuleFormPage } from "@/pages/rule-form"
 import { SettingsPage } from "@/pages/settings"
 import { SetupPage } from "@/pages/setup"
 import { RulesPage } from "@/pages/rules"
@@ -209,9 +209,11 @@ export function App() {
           <Route path="packages" element={<PackagesPage />} />
           <Route path="relationships" element={<RelationshipsPage />} />
           <Route path="rules" element={<RulesPage />} />
-          <Route path="learnings" element={<LearnedRulesPage />} />
-          <Route path="learnings/new" element={<LearningFormPage />} />
-          <Route path="learnings/edit" element={<LearningFormPage />} />
+          <Route path="rules/new" element={<RuleFormPage />} />
+          <Route path="rules/edit" element={<RuleFormPage />} />
+          <Route path="learnings" element={<LearningsRedirect />} />
+          <Route path="learnings/new" element={<LearningsFormRedirect mode="new" />} />
+          <Route path="learnings/edit" element={<LearningsFormRedirect mode="edit" />} />
           <Route path="vulnerabilities" element={<VulnerabilitiesPage />} />
           <Route path="users" element={<UsersPage />} />
           <Route path="users/new" element={<UserFormPage />} />

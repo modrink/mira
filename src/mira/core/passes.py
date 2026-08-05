@@ -303,7 +303,8 @@ def _critique_keep(verdict: dict, comment: ReviewComment) -> bool:
 async def self_critique(
     llm: LLMProvider,
     comments: list[ReviewComment],
-    learned_rules: list[str] | None = None,
+    learned_rules: list[str] | list[dict[str, str]] | None = None,
+    learned_rule_rows: list | None = None,
     custom_rules: list[dict[str, str]] | None = None,
     indexing_llm: LLMProvider | None = None,
     diff_files: list | None = None,
@@ -321,6 +322,8 @@ async def self_critique(
 
     Team-documented preferences (learned + custom rules) are surfaced to the
     critic so it doesn't drop comments that align with them as "style nits".
+    Path-scoped learned rows (`learned_rule_rows`) are filtered per comment
+    path; flat `learned_rules` still apply globally (legacy / tests).
 
     `indexing_llm`, when passed, is the caller's already-built indexing-tier
     provider; otherwise one is constructed from ``load_config()``.
@@ -342,10 +345,27 @@ async def self_critique(
         hunk = _hunk_evidence(c, diff_files)
         if hunk:
             entry += f"    Diff hunk:\n{hunk}\n"
+        path_prefs: list[str] = []
+        if learned_rule_rows is not None:
+            from mira.analysis.learned_rules import select_learned_rules
+
+            path_prefs = [
+                f"{r['title']}: {r['content']}" if r.get("title") else r["content"]
+                for r in select_learned_rules(learned_rule_rows, [c.path])
+            ]
+        elif learned_rules:
+            path_prefs = [
+                f"{r['title']}: {r['content']}" if isinstance(r, dict) else str(r)
+                for r in learned_rules
+            ]
+        if path_prefs:
+            entry += "    Team prefs for this path:\n"
+            for t in path_prefs:
+                entry += f"      - {t}\n"
         draft_lines.append(entry)
 
     rules_block = ""
-    rule_texts: list[str] = list(learned_rules or [])
+    rule_texts: list[str] = []
     for r in custom_rules or []:
         title = (r.get("title") or "").strip()
         content = (r.get("content") or "").strip()

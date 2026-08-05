@@ -67,6 +67,87 @@ def estimate_indexing_cost(file_count: int, model: str) -> dict:
     }
 
 
+def estimate_learnings_backfill_cost(
+    repo_count: int,
+    model: str,
+    *,
+    synth_calls: int | None = None,
+    avg_input_tokens: int = 16_000,
+    avg_output_tokens: int = 2_000,
+) -> dict:
+    """Estimate LLM cost of learnings backfill.
+
+    PR ingest is GitHub API only. LLM cost is staged synthesis per repo that
+    has enough human_review signal (classify batches + extract batches + one
+    cluster call; worst case: every repo).
+
+    Pass ``synth_calls`` when known from store stats; otherwise assume one
+    *repo* synth (token averages should reflect the staged pipeline).
+    ``avg_*_tokens`` are fallbacks when per-repo estimates are unavailable.
+    """
+    calls = repo_count if synth_calls is None else max(0, synth_calls)
+    if calls <= 0:
+        return {
+            "estimated_usd": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "synth_calls": 0,
+        }
+
+    input_price, output_price = MODEL_PRICING.get(model, (3.00, 15.00))
+    input_tokens = calls * max(1, avg_input_tokens)
+    output_tokens = calls * max(1, avg_output_tokens)
+    cost = (input_tokens / 1_000_000) * input_price + (output_tokens / 1_000_000) * output_price
+    return {
+        "estimated_usd": round(cost, 2),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "synth_calls": calls,
+    }
+
+
+def estimate_repo_synth_tokens(
+    *,
+    human_review_count: int,
+    catalog_count: int,
+    max_prs: int,
+) -> tuple[int, int] | None:
+    """Per-repo (input, output) tokens for staged human synth, or None if skip.
+
+    Uses stored feedback when present; for cold repos assumes a mid-size sample
+    proportional to ``max_prs`` (backfill will ingest new human comments).
+
+    Stages: batch classify + capped extract + one catalog cluster call.
+    """
+    # Caps match mira.analysis.feedback / human_synth defaults.
+    max_comments = 100
+    max_rules = 20
+    extract_cap = 40
+    classify_batch = 25
+    extract_batch = 10
+
+    projected = human_review_count
+    if projected < 2 and max_prs >= 20:
+        # First-ish fill: expect some line comments across the window.
+        projected = min(max_comments, max(8, max_prs // 5))
+    if projected < 2:
+        return None
+
+    comments = min(max_comments, projected)
+    extracts = min(extract_cap, comments)
+    classify_calls = max(1, (comments + classify_batch - 1) // classify_batch)
+    extract_calls = max(1, (extracts + extract_batch - 1) // extract_batch)
+
+    # classify: short prompt + comment bodies; extract: structured fields; cluster: catalog.
+    input_tokens = (
+        classify_calls * (800 + classify_batch * 90)
+        + extract_calls * (1_000 + extract_batch * 160)
+        + (2_200 + extracts * 70 + max(0, catalog_count) * 45)
+    )
+    output_tokens = classify_calls * 120 + extract_calls * 350 + (400 + max_rules * 180)
+    return input_tokens, output_tokens
+
+
 def get_indexing_model(config: LLMConfig, db_value: str | None = None) -> str:
     """Resolve the indexing model: DB → config.indexing_model → config.model."""
     if db_value:

@@ -27,7 +27,6 @@ import {
   ChartTooltip,
   ChartTooltipContent,
 } from "@/components/ui/chart"
-import { GitHubIcon } from "@/components/ui/github-icon"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Table,
@@ -35,11 +34,14 @@ import {
   TableCell,
   TableRow,
 } from "@/components/ui/table"
-import { api, type OrgLearnedRuleModel } from "@/lib/api"
+import { api, type UnifiedRule } from "@/lib/api"
+import { useAuth } from "@/lib/auth"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
 export function DashboardPage() {
   useDocumentTitle("Dashboard")
+  const { user } = useAuth()
+  const isAdmin = !!user?.is_admin
   const [period, setPeriod] = useState<"day" | "week" | "month">("day")
 
   const { data: stats, loading: statsLoading } = useAsync(() => api.getOrgStats(), [])
@@ -53,10 +55,13 @@ export function DashboardPage() {
     () => api.getVulnerabilitiesSummary().catch(() => null),
     [],
   )
-  // Pending learnings awaiting admin approval — surfaced as a nudge.
-  const { data: pendingLearnings } = useAsync(
-    () => api.listLearnedRules("pending").catch(() => []),
-    [],
+  // Pending rules awaiting approval — admin nudge only.
+  const { data: pendingRules } = useAsync(
+    () =>
+      isAdmin
+        ? api.listUnifiedRules({ mode: "pending" }).catch(() => [])
+        : Promise.resolve([]),
+    [isAdmin],
   )
 
   const [indexingJobs, setIndexingJobs] = useState<
@@ -247,9 +252,9 @@ export function DashboardPage() {
         <SecurityAlertsCard summary={vulnSummary} />
       )}
 
-      {/* Nudge to review learnings waiting on admin approval. */}
-      {pendingLearnings && pendingLearnings.length > 0 && (
-        <PendingLearningsCard rules={pendingLearnings} />
+      {/* Nudge to review pending rules (admin). */}
+      {isAdmin && pendingRules && pendingRules.length > 0 && (
+        <PendingRulesCard rules={pendingRules} />
       )}
 
       {/* Period selector */}
@@ -579,23 +584,23 @@ function CategoryBarChart({ categories }: { categories: Record<string, number> }
   )
 }
 
-function PendingLearningsCard({ rules }: { rules: OrgLearnedRuleModel[] }) {
+function PendingRulesCard({ rules }: { rules: UnifiedRule[] }) {
   const navigate = useNavigate()
   const top = rules.slice(0, 3)
   const more = rules.length - top.length
-  const href = "/learnings?tab=pending"
+  const href = "/rules?mode=pending"
   return (
     <Card className="overflow-hidden">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between gap-3">
           <div>
             <CardTitle className="text-base">
-              {rules.length} learning{rules.length !== 1 ? "s" : ""} awaiting approval
+              {rules.length} pending rule{rules.length !== 1 ? "s" : ""}
             </CardTitle>
             <CardDescription>Approve before they affect reviews.</CardDescription>
           </div>
           <Button asChild size="sm">
-            <a href={href}>Review &amp; approve</a>
+            <a href={href}>Open Pending</a>
           </Button>
         </div>
       </CardHeader>
@@ -604,18 +609,16 @@ function PendingLearningsCard({ rules }: { rules: OrgLearnedRuleModel[] }) {
           <TableBody>
             {top.map((r) => (
               <TableRow
-                key={`${r.owner}/${r.repo}#${r.id}`}
+                key={`${r.platform}:${r.owner}/${r.repo}#${r.id}`}
                 className="cursor-pointer"
                 onClick={() => navigate(href)}
               >
                 <TableCell className="w-px whitespace-nowrap font-mono text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1.5">
-                    <GitHubIcon className="h-3.5 w-3.5 shrink-0" />
-                    {r.owner}/{r.repo}
-                  </span>
+                  {r.owner}/{r.repo}
+                  {r.platform && r.platform !== "github" ? ` · ${r.platform}` : ""}
                 </TableCell>
                 <TableCell className="max-w-0 text-sm text-muted-foreground">
-                  <span className="block truncate">{r.rule_text}</span>
+                  <span className="block truncate">{r.text}</span>
                 </TableCell>
               </TableRow>
             ))}

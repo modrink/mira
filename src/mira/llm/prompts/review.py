@@ -31,7 +31,7 @@ def build_review_prompt(
     pr_description: str = "",
     existing_comments: list[UnresolvedThread] | None = None,
     code_context: str = "",
-    learned_rules: list[str] | None = None,
+    learned_rules: list[str] | list[dict[str, str]] | None = None,
     custom_rules: list[dict[str, str]] | None = None,
     file_history: dict | None = None,
     review_round: int = 1,

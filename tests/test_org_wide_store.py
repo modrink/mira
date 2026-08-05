@@ -7,6 +7,7 @@ import pytest
 from mira.index.store import (
     IndexStore,
     _iter_repo_dbs,
+    list_learned_rules_org_wide_sqlite,
     search_packages_org_wide_sqlite,
 )
 
@@ -39,3 +40,38 @@ def test_package_search_includes_gitlab(index_dir):
     by_platform = {(h["platform"], h["owner"], h["repo"]) for h in hits}
     assert ("github", "acme", "web") in by_platform
     assert ("gitlab", "grp", "app") in by_platform
+
+
+def test_org_learned_rules_hide_accept_pattern(index_dir):
+    store = IndexStore.open("acme", "web")
+    store.upsert_learned_rule(
+        rule_text="noise accept",
+        source_signal="accept_pattern",
+        category="style",
+        path_pattern="",
+        sample_count=5,
+    )
+    store.upsert_learned_rule(
+        rule_text="real reject",
+        source_signal="reject_pattern",
+        category="style",
+        path_pattern="",
+        sample_count=5,
+    )
+    store.close()
+
+    rows = list_learned_rules_org_wide_sqlite()
+    assert all(r["source_signal"] != "accept_pattern" for r in rows)
+    assert any(r["rule_text"] == "real reject" for r in rows)
+    assert any(r.get("platform") == "github" for r in rows)
+
+
+def test_decode_store_owner_key_roundtrip():
+    from mira.index.store import decode_store_owner_key, encode_store_owner_key
+
+    assert encode_store_owner_key("acme", "github") == "acme"
+    assert encode_store_owner_key("acme", "gitlab") == "_gitlab/acme"
+    assert decode_store_owner_key("_gitlab/group/sub") == ("gitlab", "group/sub")
+    assert decode_store_owner_key("acme") == ("github", "acme")
+    key = encode_store_owner_key("grp/sub", "forgejo")
+    assert decode_store_owner_key(key) == ("forgejo", "grp/sub")

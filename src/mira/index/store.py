@@ -16,6 +16,35 @@ logger = logging.getLogger(__name__)
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
+
+def _merge_evidence_prs(existing: str, incoming: str, *, limit: int = 20) -> str:
+    """Union comma-separated PR numbers, order preserved, capped."""
+    seen: list[str] = []
+    for raw in (existing or "").split(",") + (incoming or "").split(","):
+        part = raw.strip()
+        if not part or not part.lstrip("-").isdigit():
+            continue
+        if part not in seen:
+            seen.append(part)
+    return ",".join(seen[:limit])
+
+
+def encode_store_owner_key(owner: str, platform: str = "github") -> str:
+    """Namespace non-GitHub owners the same way ``IndexStore.open`` does."""
+    if platform == "github" or not platform:
+        return owner
+    return f"_{platform}/{owner}"
+
+
+def decode_store_owner_key(key_owner: str) -> tuple[str, str]:
+    """Inverse of ``encode_store_owner_key`` → ``(platform, owner)``."""
+    if key_owner.startswith("_") and "/" in key_owner[1:]:
+        platform, _, owner = key_owner[1:].partition("/")
+        if platform and owner:
+            return platform, owner
+    return "github", key_owner
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
@@ -169,6 +198,10 @@ CREATE TABLE IF NOT EXISTS learned_rules (
     status TEXT NOT NULL DEFAULT 'approved',
     -- Username of the admin who authored a manual rule; '' for synthesized.
     created_by TEXT NOT NULL DEFAULT '',
+    -- Comma-separated PR numbers that supported synthesizing this rule.
+    evidence_prs TEXT NOT NULL DEFAULT '',
+    -- Shared id across per-repo copies when a learned rule spans multiple repos.
+    group_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0,
     updated_at REAL NOT NULL DEFAULT 0
 );
@@ -334,6 +367,8 @@ class LearnedRuleRow:
     active: bool = True
     status: str = "approved"  # 'pending' | 'approved' | 'rejected'
     created_by: str = ""
+    evidence_prs: str = ""  # comma-separated PR numbers supporting the rule
+    group_id: str = ""  # shared across multi-repo copies; '' = singleton
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -410,6 +445,14 @@ class IndexStore(_StoreSharedMixin):
             self._conn.execute(
                 "ALTER TABLE learned_rules ADD COLUMN created_by TEXT NOT NULL DEFAULT ''"
             )
+        if "evidence_prs" not in lr_cols:
+            self._conn.execute(
+                "ALTER TABLE learned_rules ADD COLUMN evidence_prs TEXT NOT NULL DEFAULT ''"
+            )
+        if "group_id" not in lr_cols:
+            self._conn.execute(
+                "ALTER TABLE learned_rules ADD COLUMN group_id TEXT NOT NULL DEFAULT ''"
+            )
         self._conn.commit()
 
     @classmethod
@@ -421,7 +464,7 @@ class IndexStore(_StoreSharedMixin):
         (``_{platform}/{owner}``) so a same-named repo on another platform gets
         its own store; GitHub paths are unchanged for back-compat.
         """
-        key_owner = owner if platform == "github" else f"_{platform}/{owner}"
+        key_owner = encode_store_owner_key(owner, platform)
         db_url = os.environ.get("DATABASE_URL", "")
         if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
             try:
@@ -1252,6 +1295,45 @@ class IndexStore(_StoreSharedMixin):
             for r in rows
         ]
 
+    def has_pr_merge_learning(self, pr_number: int) -> bool:
+        """True if this PR was already ingested by merge-time / backfill learning.
+
+        Indexed by pr_number — not a truncated recent window — so large backfills
+        stay idempotent on re-run.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM feedback_events WHERE pr_number = ? "
+            "AND signal IN ('accepted', 'human_review', 'merge_scanned') LIMIT 1",
+            (pr_number,),
+        ).fetchone()
+        return row is not None
+
+    def list_feedback_for_pr(self, pr_number: int) -> list[FeedbackEventRow]:
+        """All feedback events for one PR (reject locations, etc.)."""
+        rows = self._conn.execute(
+            "SELECT id, pr_number, pr_url, comment_path, comment_line, "
+            "comment_category, comment_severity, comment_title, signal, actor, pr_author, created_at "
+            "FROM feedback_events WHERE pr_number = ?",
+            (pr_number,),
+        ).fetchall()
+        return [
+            FeedbackEventRow(
+                id=r[0],
+                pr_number=r[1],
+                pr_url=r[2],
+                comment_path=r[3],
+                comment_line=r[4],
+                comment_category=r[5],
+                comment_severity=r[6],
+                comment_title=r[7],
+                signal=r[8],
+                actor=r[9],
+                pr_author=r[10],
+                created_at=r[11],
+            )
+            for r in rows
+        ]
+
     def get_feedback_stats(self) -> dict:
         """Aggregate feedback counts by signal, category, and path directory."""
         rows = self._conn.execute(
@@ -1273,37 +1355,54 @@ class IndexStore(_StoreSharedMixin):
         path_pattern: str,
         sample_count: int,
         status: str = "pending",
+        evidence_prs: str = "",
     ) -> LearnedRuleRow:
         now = time.time()
         existing = self._conn.execute(
-            "SELECT id, status FROM learned_rules WHERE category = ? AND path_pattern = ?",
+            "SELECT id, status, rule_text, evidence_prs FROM learned_rules "
+            "WHERE category = ? AND path_pattern = ?",
             (category, path_pattern),
         ).fetchone()
         if existing:
-            # Keep the existing approval status — re-synthesis (more samples)
-            # must never silently re-activate a rejected rule or auto-approve.
+            # Keep approval status. Freeze rule_text once approved/rejected so
+            # backfill / re-synthesis cannot silently rewrite admin-reviewed copy.
+            existing_status = existing[1]
+            keep_text = existing[2] if existing_status in ("approved", "rejected") else rule_text
+            merged_evidence = _merge_evidence_prs(str(existing[3] or ""), evidence_prs)
             self._conn.execute(
                 "UPDATE learned_rules SET rule_text = ?, source_signal = ?, "
-                "sample_count = ?, updated_at = ? WHERE id = ?",
-                (rule_text, source_signal, sample_count, now, existing[0]),
+                "sample_count = ?, evidence_prs = ?, updated_at = ? WHERE id = ?",
+                (keep_text, source_signal, sample_count, merged_evidence, now, existing[0]),
             )
             self._conn.commit()
             return LearnedRuleRow(
                 id=existing[0],
-                rule_text=rule_text,
+                rule_text=keep_text,
                 source_signal=source_signal,
                 category=category,
                 path_pattern=path_pattern,
                 sample_count=sample_count,
-                status=existing[1],
+                status=existing_status,
+                evidence_prs=merged_evidence,
                 created_at=now,
                 updated_at=now,
             )
         cur = self._conn.execute(
             "INSERT INTO learned_rules "
             "(rule_text, source_signal, category, path_pattern, sample_count, "
-            "active, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
-            (rule_text, source_signal, category, path_pattern, sample_count, status, now, now),
+            "active, status, evidence_prs, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+            (
+                rule_text,
+                source_signal,
+                category,
+                path_pattern,
+                sample_count,
+                status,
+                evidence_prs,
+                now,
+                now,
+            ),
         )
         self._conn.commit()
         row_id = cur.lastrowid
@@ -1317,11 +1416,44 @@ class IndexStore(_StoreSharedMixin):
             path_pattern=path_pattern,
             sample_count=sample_count,
             status=status,
+            evidence_prs=evidence_prs,
             created_at=now,
             updated_at=now,
         )
 
     def _row_to_learned_rule(self, r: tuple) -> LearnedRuleRow:
+        # Supports pre-/post-evidence_prs and group_id column layouts.
+        if len(r) >= 13:
+            return LearnedRuleRow(
+                id=r[0],
+                rule_text=r[1],
+                source_signal=r[2],
+                category=r[3],
+                path_pattern=r[4],
+                sample_count=r[5],
+                active=bool(r[6]),
+                status=r[7],
+                created_by=r[8],
+                evidence_prs=r[9] or "",
+                group_id=r[10] or "",
+                created_at=r[11],
+                updated_at=r[12],
+            )
+        if len(r) >= 12:
+            return LearnedRuleRow(
+                id=r[0],
+                rule_text=r[1],
+                source_signal=r[2],
+                category=r[3],
+                path_pattern=r[4],
+                sample_count=r[5],
+                active=bool(r[6]),
+                status=r[7],
+                created_by=r[8],
+                evidence_prs=r[9] or "",
+                created_at=r[10],
+                updated_at=r[11],
+            )
         return LearnedRuleRow(
             id=r[0],
             rule_text=r[1],
@@ -1338,14 +1470,17 @@ class IndexStore(_StoreSharedMixin):
 
     _LR_COLS = (
         "id, rule_text, source_signal, category, path_pattern, "
-        "sample_count, active, status, created_by, created_at, updated_at"
+        "sample_count, active, status, created_by, evidence_prs, group_id, "
+        "created_at, updated_at"
     )
 
     def list_active_learned_rules(self) -> list[LearnedRuleRow]:
-        # Only approved + enabled rules feed reviews.
+        # Only approved + enabled rules feed reviews. Skip accept_pattern noise.
         rows = self._conn.execute(
             f"SELECT {self._LR_COLS} FROM learned_rules "
-            "WHERE active = 1 AND status = 'approved' ORDER BY sample_count DESC"
+            "WHERE active = 1 AND status = 'approved' "
+            "AND source_signal != 'accept_pattern' "
+            "ORDER BY sample_count DESC"
         ).fetchall()
         return [self._row_to_learned_rule(r) for r in rows]
 
@@ -1378,22 +1513,28 @@ class IndexStore(_StoreSharedMixin):
         status: str = "approved",
         active: bool = True,
         created_by: str = "",
+        group_id: str = "",
+        evidence_prs: str = "",
+        sample_count: int = 0,
     ) -> LearnedRuleRow:
         """Insert an admin-authored rule (not deduped against existing)."""
         now = time.time()
         cur = self._conn.execute(
             "INSERT INTO learned_rules "
             "(rule_text, source_signal, category, path_pattern, sample_count, "
-            "active, status, created_by, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            "active, status, created_by, evidence_prs, group_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rule_text,
                 source_signal,
                 category,
                 path_pattern,
+                sample_count,
                 int(active),
                 status,
                 created_by,
+                evidence_prs,
+                group_id,
                 now,
                 now,
             ),
@@ -1405,14 +1546,72 @@ class IndexStore(_StoreSharedMixin):
         return self.get_learned_rule(row_id)  # type: ignore[return-value]
 
     def update_learned_rule(
-        self, rule_id: int, rule_text: str, category: str, path_pattern: str
+        self,
+        rule_id: int,
+        rule_text: str,
+        category: str,
+        path_pattern: str,
+        group_id: str | None = None,
     ) -> None:
+        if group_id is None:
+            self._conn.execute(
+                "UPDATE learned_rules SET rule_text = ?, category = ?, path_pattern = ?, "
+                "updated_at = ? WHERE id = ?",
+                (rule_text, category, path_pattern, time.time(), rule_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE learned_rules SET rule_text = ?, category = ?, path_pattern = ?, "
+                "group_id = ?, updated_at = ? WHERE id = ?",
+                (rule_text, category, path_pattern, group_id, time.time(), rule_id),
+            )
+        self._conn.commit()
+
+    def set_learned_rule_group_id(self, rule_id: int, group_id: str) -> None:
         self._conn.execute(
-            "UPDATE learned_rules SET rule_text = ?, category = ?, path_pattern = ?, "
-            "updated_at = ? WHERE id = ?",
-            (rule_text, category, path_pattern, time.time(), rule_id),
+            "UPDATE learned_rules SET group_id = ?, updated_at = ? WHERE id = ?",
+            (group_id, time.time(), rule_id),
         )
         self._conn.commit()
+
+    def bump_learned_rule_evidence(
+        self,
+        rule_id: int,
+        sample_count: int,
+        rule_text: str | None = None,
+        evidence_prs: str = "",
+        *,
+        replace_evidence: bool = False,
+    ) -> LearnedRuleRow | None:
+        """Bump sample_count; rewrite rule_text only while status is pending."""
+        existing = self.get_learned_rule(rule_id)
+        if existing is None:
+            return None
+        now = time.time()
+        if existing.status == "pending" and rule_text and rule_text.strip():
+            keep_text = rule_text.strip()
+        else:
+            keep_text = existing.rule_text
+        if replace_evidence and evidence_prs:
+            merged_evidence = _merge_evidence_prs("", evidence_prs)
+        else:
+            merged_evidence = _merge_evidence_prs(existing.evidence_prs, evidence_prs)
+        self._conn.execute(
+            "UPDATE learned_rules SET rule_text = ?, sample_count = ?, "
+            "evidence_prs = ?, updated_at = ? WHERE id = ?",
+            (keep_text, sample_count, merged_evidence, now, rule_id),
+        )
+        self._conn.commit()
+        return self.get_learned_rule(rule_id)
+
+    def last_feedback_signal_at(self, signal: str) -> float:
+        """Newest ``created_at`` for a feedback signal, or 0 if none."""
+        row = self._conn.execute(
+            "SELECT created_at FROM feedback_events WHERE signal = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (signal,),
+        ).fetchone()
+        return float(row[0]) if row else 0.0
 
     def set_learned_rule_status(self, rule_id: int, status: str) -> None:
         self._conn.execute(
@@ -1791,15 +1990,21 @@ def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = No
                     continue
                 status_sel = "status" if has_status else "'approved'"
                 created_by_sel = "created_by" if "created_by" in cols else "''"
-                where, params = "", ()
+                evidence_sel = "evidence_prs" if "evidence_prs" in cols else "''"
+                group_sel = "group_id" if "group_id" in cols else "''"
+                # Retire accept_pattern tautologies from the dashboard catalog.
+                clauses = ["source_signal != 'accept_pattern'"]
+                params: list = []
                 if status and has_status:
-                    where, params = " WHERE status = ?", (status,)
+                    clauses.append("status = ?")
+                    params.append(status)
+                where = " WHERE " + " AND ".join(clauses)
                 cur = conn.execute(
                     "SELECT id, rule_text, source_signal, category, path_pattern, "
                     f"sample_count, active, {status_sel}, {created_by_sel}, "
-                    "created_at, updated_at "
+                    f"{evidence_sel}, {group_sel}, created_at, updated_at "
                     f"FROM learned_rules{where} ORDER BY updated_at DESC",
-                    params,
+                    tuple(params),
                 )
                 for r in cur.fetchall():
                     rows.append(
@@ -1816,8 +2021,10 @@ def list_learned_rules_org_wide_sqlite(limit: int = 500, status: str | None = No
                             "active": bool(r[6]),
                             "status": r[7],
                             "created_by": r[8],
-                            "created_at": r[9],
-                            "updated_at": r[10],
+                            "evidence_prs": r[9] or "",
+                            "group_id": r[10] or "",
+                            "created_at": r[11],
+                            "updated_at": r[12],
                         }
                     )
             finally:

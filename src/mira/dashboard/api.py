@@ -68,16 +68,29 @@ def _pick_platform_record(records: list) -> object:
 
 
 @contextmanager
-def _open_store(owner: str, repo: str) -> Generator[IndexStore, None, None]:
+def _open_store(
+    owner: str, repo: str, platform: str | None = None
+) -> Generator[IndexStore, None, None]:
     """Open an IndexStore via the factory (Postgres or SQLite).
 
-    The dashboard routes are keyed by (owner, repo) only, so resolve the
-    platform from the registry with a single cross-platform lookup.
+    Routes are keyed by (owner, repo). When ``platform`` is set, open that
+    host's store; otherwise pick the preferred registered platform.
     """
     repo_records = _app_db.get_repo_any_platform(owner, repo)
     if not repo_records:
         raise HTTPException(status_code=404, detail=f"Repo {owner}/{repo} not found")
-    repo_record = _pick_platform_record(repo_records)
+    if platform:
+        repo_record = next(
+            (r for r in repo_records if getattr(r, "platform", None) == platform),
+            None,
+        )
+        if repo_record is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Repo {owner}/{repo} not found on {platform}",
+            )
+    else:
+        repo_record = _pick_platform_record(repo_records)
 
     store = IndexStore.open(owner, repo, platform=repo_record.platform)
     try:
@@ -638,19 +651,97 @@ class RuleCreate(BaseModel):
 class LearnedRuleModel(BaseModel):
     id: int = 0
     rule_text: str
-    source_signal: str  # "reject_pattern" | "accept_pattern" | "human_pattern" | "manual"
+    source_signal: (
+        str  # "reject_pattern" | "human_pattern" | "manual" (legacy accept_pattern hidden)
+    )
     category: str
     path_pattern: str = ""
     sample_count: int = 0
     active: bool = True
     status: str = "approved"  # 'pending' | 'approved' | 'rejected'
-    created_by: str = ""  # admin username for manual rules; '' for synthesized
+    created_by: str = ""  # username for hand-added / @remember; '' for synthesized
+    evidence_prs: str = ""  # comma-separated supporting PR numbers
+    group_id: str = ""
     updated_at: float = 0.0
 
 
 class OrgLearnedRuleModel(LearnedRuleModel):
     owner: str
     repo: str
+    platform: str = "github"
+
+
+class UnifiedRule(BaseModel):
+    """Product-facing Rule row (façade over global / review_context / learned)."""
+
+    id: int
+    kind: str  # written_global | written_repo | learned
+    owner: str = ""
+    repo: str = ""
+    platform: str = "github"
+    title: str = ""
+    text: str = ""
+    enabled: bool = True
+    status: str = "approved"  # pending | approved | rejected
+    category: str = ""
+    path_pattern: str = ""
+    source_signal: str = ""
+    sample_count: int = 0
+    evidence_prs: str = ""
+    created_by: str = ""
+    priority: str = "written"  # written | learned (display)
+    updated_at: float = 0.0
+    group_id: str = ""  # learned multi-repo copies
+    repos: list[str] = []  # "owner/repo" product scope (grouped learned)
+
+
+class ScopeRepoRef(BaseModel):
+    owner: str
+    repo: str
+    platform: str = "github"
+
+
+class UnifiedRuleCreate(BaseModel):
+    kind: str
+    title: str = ""
+    text: str = ""
+    owner: str = ""
+    repo: str = ""
+    platform: str = "github"
+    category: str = "other"
+    path_pattern: str = ""
+
+
+class UnifiedRuleUpdate(BaseModel):
+    kind: str
+    id: int
+    title: str = ""
+    text: str = ""
+    owner: str = ""
+    repo: str = ""
+    platform: str = "github"
+    category: str = "other"
+    path_pattern: str = ""
+    # Optional scope change: "global" | "repos". Omit = text-only (still syncs group).
+    scope: str | None = None
+    scope_repos: list[ScopeRepoRef] | None = None
+
+
+class UnifiedRuleRef(BaseModel):
+    kind: str
+    id: int
+    owner: str = ""
+    repo: str = ""
+    platform: str = "github"
+
+
+class UnifiedRuleEnabled(BaseModel):
+    kind: str
+    id: int
+    enabled: bool
+    owner: str = ""
+    repo: str = ""
+    platform: str = "github"
 
 
 class LearnedRuleInput(BaseModel):
@@ -1273,6 +1364,7 @@ import mira.dashboard.routers.core  # noqa: E402,F401
 import mira.dashboard.routers.relationships  # noqa: E402,F401
 import mira.dashboard.routers.repos  # noqa: E402,F401
 import mira.dashboard.routers.rules  # noqa: E402,F401
+import mira.dashboard.routers.unified_rules  # noqa: E402,F401
 import mira.dashboard.routers.vulnerabilities  # noqa: E402,F401
 
 

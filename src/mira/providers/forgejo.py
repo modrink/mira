@@ -470,6 +470,7 @@ class ForgejoProvider(BaseProvider):
                         line=int(line),
                         body=comment.get("body") or "",
                         author=comment_user,
+                        diff_hunk=comment.get("diff_hunk") or "",
                     )
                 )
         except Exception as e:

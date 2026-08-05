@@ -117,12 +117,70 @@ export interface LearnedRuleModel {
   active: boolean
   status: "pending" | "approved" | "rejected"
   created_by: string
+  evidence_prs?: string
   updated_at: number
 }
 
 export interface OrgLearnedRuleModel extends LearnedRuleModel {
   owner: string
   repo: string
+  platform?: string
+}
+
+export type UnifiedRuleKind = "written_global" | "written_repo" | "learned"
+
+export interface UnifiedRule {
+  id: number
+  kind: UnifiedRuleKind
+  owner: string
+  repo: string
+  platform: string
+  title: string
+  text: string
+  enabled: boolean
+  status: "pending" | "approved" | "rejected" | string
+  category: string
+  path_pattern: string
+  source_signal: string
+  sample_count: number
+  evidence_prs: string
+  created_by: string
+  priority: string
+  updated_at: number
+  group_id?: string
+  repos?: string[]
+}
+
+export interface ScopeRepoRef {
+  owner: string
+  repo: string
+  platform?: string
+}
+
+export interface UnifiedRuleCreate {
+  kind: UnifiedRuleKind
+  title?: string
+  text: string
+  owner?: string
+  repo?: string
+  platform?: string
+  category?: string
+  path_pattern?: string
+}
+
+export interface UnifiedRuleUpdate extends UnifiedRuleCreate {
+  id: number
+  kind: UnifiedRuleKind
+  scope?: "global" | "repos"
+  scope_repos?: ScopeRepoRef[]
+}
+
+export interface UnifiedRuleRef {
+  kind: UnifiedRuleKind
+  id: number
+  owner?: string
+  repo?: string
+  platform?: string
 }
 
 export interface RepoEdgeModel {

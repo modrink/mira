@@ -1176,14 +1176,18 @@ class ReviewEngine:
             provider=self.llm,
         )
 
-        learned_rules: list[str] = []
+        learned_rule_rows: list = []
         custom_rules: list[dict[str, str]] = []
         try:
             pr_info = getattr(self, "_pr_info", None)
             if pr_info is not None:
-                _rules_store = IndexStore.open(pr_info.owner, pr_info.repo)
+                _platform = getattr(pr_info, "platform", None) or "github"
+                _rules_store = IndexStore.open(pr_info.owner, pr_info.repo, platform=_platform)
 
-                learned_rules = _rules_store.get_learned_rules_text()
+                # Inject into review prompt:
+                # custom_rules (global → hand repo → instruction files) outrank
+                # mined learned_rules (path-scoped per chunk). See review.jinja2.
+                learned_rule_rows = list(_rules_store.list_active_learned_rules())
 
                 for ctx in _rules_store.list_review_context():
                     custom_rules.append({"title": ctx.title, "content": ctx.content})
@@ -1201,8 +1205,20 @@ class ReviewEngine:
                             custom_rules.insert(0, {"title": title, "content": content})
                 except Exception:
                     pass
+
+                # Ingest common agent/review instruction files from the PR base tip.
+                try:
+                    from mira.analysis.instruction_files import load_instruction_custom_rules
+
+                    ingested = await load_instruction_custom_rules(self.provider, pr_info)
+                    for rule in ingested:
+                        custom_rules.append(rule)
+                except Exception:
+                    pass
         except Exception:
             pass
+
+        from mira.analysis.learned_rules import select_learned_rules
 
         valid_paths = {f.path for f in filtered}
         base_existing = list(existing_comments) if existing_comments else []
@@ -1224,6 +1240,8 @@ class ReviewEngine:
                     chunk_history = {
                         f.path: file_history[f.path] for f in chunk.files if f.path in file_history
                     }
+                    chunk_paths = [f.path for f in chunk.files]
+                    chunk_learned = select_learned_rules(learned_rule_rows, chunk_paths)
                     messages = build_review_prompt(
                         files=chunk.files,
                         config=self.config,
@@ -1231,7 +1249,7 @@ class ReviewEngine:
                         pr_description=pr_description,
                         existing_comments=base_existing or None,
                         code_context=code_context_block,
-                        learned_rules=learned_rules or None,
+                        learned_rules=chunk_learned or None,
                         custom_rules=custom_rules or None,
                         file_history=chunk_history or None,
                         review_round=review_round,
@@ -1425,7 +1443,7 @@ class ReviewEngine:
                 final_comments = await self_critique(
                     self.llm,
                     final_comments,
-                    learned_rules=learned_rules or None,
+                    learned_rule_rows=learned_rule_rows or None,
                     custom_rules=custom_rules or None,
                     indexing_llm=self.indexing_llm,
                     diff_files=critique_files,
