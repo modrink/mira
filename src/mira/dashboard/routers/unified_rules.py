@@ -538,6 +538,33 @@ def reject_unified_rule(body: UnifiedRuleRef, request: Request) -> dict:
     return {"ok": True}
 
 
+@router.post("/api/rules/clear-pending")
+def clear_pending_learned_rules(
+    request: Request,
+    repo: RepoQ = None,
+) -> dict:
+    """Admin: delete auto-synth Pending learnings (keep @remember / hand-authored).
+
+    Does not reject — clean slate for Rebuild/smoke. Optional ``repo=owner/name``.
+    """
+    from mira.dashboard import rule_scope as scope
+    from mira.dashboard.routers.rules import _require_admin
+
+    _require_admin(request)
+    owner = ""
+    name = ""
+    raw = (repo or "").strip()
+    if raw and raw not in ("__all__", "all"):
+        if "/" not in raw:
+            raise HTTPException(status_code=400, detail="repo must be owner/name")
+        owner, name = raw.split("/", 1)
+        owner, name = owner.strip(), name.strip()
+        if not owner or not name:
+            raise HTTPException(status_code=400, detail="repo must be owner/name")
+    cleared = scope.clear_pending_auto_synth(owner=owner, repo=name)
+    return {"cleared": cleared}
+
+
 @router.patch("/api/rules/enabled", response_model=UnifiedRule)
 def set_unified_rule_enabled(body: UnifiedRuleEnabled, request: Request) -> UnifiedRule:
     if body.kind == "written_global":

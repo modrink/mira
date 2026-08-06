@@ -14,12 +14,64 @@ _INTERNAL_PATH_RE = re.compile(r"^__[\w]+__$")
 _NEAR_DUPE_RATIO = 0.80
 _TITLE_MAX = 80
 _BODY_MAX = 2000
+_SYNTH_BODY_MIN = 120
 _INJECT_BODY_MAX = int(os.environ.get("MIRA_LEARNED_INJECT_BODY_MAX", "600"))
+_ALNUM_TOKEN_RE = re.compile(r"[a-z0-9_]+", re.I)
+# Non-actionable hedges / question-shaped guidance (synth quality gate).
+_MUSH_BODY_RE = re.compile(
+    r"\b("
+    r"if necessary|check if|consider (?:whether|using|if)|"
+    r"in the context|for better (?:readability|user experience)|"
+    r"improve readability|when possible|be mindful|"
+    r"may not be efficient"
+    r")\b",
+    re.I,
+)
+_CUE_RE = re.compile(
+    r"`[^`]+`"  # backtick span
+    r"|[A-Z][A-Za-z0-9_]*::"  # Class::
+    r"|[A-Za-z_][A-Za-z0-9_]*\("  # call(
+)
 
 
 def normalize_rule_text(rule_text: str) -> str:
     """Collapse whitespace + case for dedupe keys."""
     return " ".join(rule_text.lower().split())
+
+
+def _alnum_tokens(text: str) -> set[str]:
+    return {m.group(0).lower() for m in _ALNUM_TOKEN_RE.finditer(text or "")}
+
+
+def body_has_mush(text: str) -> bool:
+    """True when body/title uses non-actionable hedge phrasing."""
+    return bool(_MUSH_BODY_RE.search(text or ""))
+
+
+def body_passes_synth_gate(title: str, body: str) -> bool:
+    """Medium inject-fitted body: length, no mush, not a title paraphrase.
+
+    Soft org conventions without backticks still pass when long enough and
+    not a near restatement of the title.
+    """
+    title = " ".join((title or "").split()).strip()
+    body = (body or "").strip()
+    if not title or not body:
+        return False
+    if len(body) < _SYNTH_BODY_MIN:
+        return False
+    if body_has_mush(title) or body_has_mush(body):
+        return False
+    title_toks = _alnum_tokens(title)
+    body_toks = _alnum_tokens(body)
+    if title_toks:
+        overlap = len(title_toks & body_toks) / len(title_toks)
+        has_cue = bool(_CUE_RE.search(body))
+        novel = body_toks - title_toks
+        # Title paraphrase with no extra signal → fail.
+        if overlap >= 0.7 and not has_cue and len(novel) < 4:
+            return False
+    return True
 
 
 def pack_learned_rule(title: str, body: str) -> str:
@@ -47,7 +99,11 @@ def unpack_learned_rule(rule_text: str) -> tuple[str, str]:
 
 
 def rule_text_from_synth_action(item: dict) -> str:
-    """Pack title+body from a synth action. Empty when gate fails."""
+    """Pack title+body from a synth action. Empty when size/title gate fails.
+
+    Does not apply the Medium substance gate — callers that mint Pending from
+    LLM extract should use :func:`body_passes_synth_gate` separately.
+    """
     return pack_learned_rule(str(item.get("title") or ""), str(item.get("body") or ""))
 
 

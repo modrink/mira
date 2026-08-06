@@ -9,7 +9,7 @@ Respond in JSON only. No markdown fences.
     {
       "action": "create",
       "title": "Prefer the project HTTP client for outbound calls",
-      "body": "When application code makes outbound HTTP, use the shared client rather than shelling out. Flag curl / curl_* in application code.",
+      "body": "When application code makes outbound HTTP, use the shared client rather than shelling out. Prefer shared HTTP helpers over curl / curl_* in application code.",
       "path_hint": "",
       "prs": [1201, 1204],
       "evidence_count": 3
@@ -30,15 +30,25 @@ Respond in JSON only. No markdown fences.
 }
 
 Guidelines:
-- At most {{ max_rules }} actions (create + merge). Prefer create for distinct preferences — volume over purity. Admins will enable/disable.
-- Simple org conventions are valid creates.
-- Merge near-duplicates — same title theme + same guidance → ONE action.
-- skip only for: exact catalog coverage, near-duplicates of **rejected** rules, or zero coding guidance.
-- Do not skip merely because a rule is soft, short, or single-PR.
+- At most {{ max_rules }} actions (create + merge). Prefer reusable preferences a review engine can match in a diff — quality over volume.
+- Simple asserted org conventions are valid creates when the body is concrete (when + preferred + cue).
+- Merge near-duplicates — same title theme + same guidance → ONE action. Prefer merging when multiple candidates support one preference.
+- Single-PR creates are allowed when the body is concrete and reusable beyond one call site.
+- skip when:
+  - exact catalog coverage
+  - near-duplicates of **rejected** rules, or the **same failure class** as rejected / seed anti-examples
+  - clarifying questions, one-shot local chores, non-actionable hedges (“check if”, “if necessary”)
+  - zero coding guidance / title-only paraphrase mush
 - For merge into **pending**, supply sharper title/body when needed. Never rewrite approved/rejected wording (omit title and body or leave empty).
-- Prefer empty path_hint. If scoping, keep shallow (≤2 segments). Never deep comment folders.
+- `path_hint`: area-bound preferences → shallow directory glob (≤2 segments) from that area (`src/**`, `migrations/**`, `tests/**`, …). Cross-cutting → `""`. Never deep comment folders, filenames, or invented framework roots.
 - `prs` from supporting candidates. Cap at 8.
 - If nothing useful, return {"actions": []}.
+
+## Do not create similar classes (seed anti-examples)
+
+{% for s in seed_anti_examples %}
+- {{ s.class }}: {{ s.example }}
+{% endfor %}
 
 {% if catalog %}
 ## Existing catalog (pending + approved)
@@ -53,7 +63,7 @@ Guidelines:
 {% endif %}
 
 {% if rejected %}
-## Rejected rules (do NOT recreate near-duplicates)
+## Rejected rules (do NOT recreate near-duplicates or the same class)
 
 {% for r in rejected %}
 - {{ r.rule_text }}

@@ -57,6 +57,10 @@ tests/benchmarks/runs/
 # Local eval-regression fixtures — repo-specific PR URLs and history.
 tests/eval_regressions/
 
+# Local NDA / audit exports (company rule dumps) — never commit.
+*.export.json
+*.export.md
+
 # Frontend
 ui/mira/node_modules/
 ui/mira/dist/

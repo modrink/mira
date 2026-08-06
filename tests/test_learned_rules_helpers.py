@@ -161,6 +161,32 @@ def test_pack_unpack_human_comment_with_hunk():
     assert unpack_human_comment_for_synth("plain comment") == ("plain comment", "")
 
 
+def test_body_passes_synth_gate():
+    from mira.analysis.learned_rules import body_has_mush, body_passes_synth_gate
+
+    good = (
+        "When catching errors in application code, catch named exception types "
+        "instead of bare `except:` so failures stay diagnosable."
+    )
+    assert body_passes_synth_gate("Catch specific exceptions", good)
+    soft = (
+        "When naming variables and methods in application code, prefer camelCase "
+        "so identifiers stay consistent with the rest of the codebase."
+    )
+    assert body_passes_synth_gate("Use camelCase for consistency", soft)
+    assert not body_passes_synth_gate("Thin", "Too short.")
+    assert not body_passes_synth_gate(
+        "Filter based on environment if necessary",
+        "Check if filtering based on the `$environment` variable is required in the context.",
+    )
+    assert body_has_mush("Check if filtering is required in the context.")
+    # Title paraphrase without novel cue.
+    assert not body_passes_synth_gate(
+        "Use empty for readability",
+        "Use empty for readability. Prefer empty for better readability in conditionals.",
+    )
+
+
 def test_sanitize_path_hint():
     assert sanitize_path_hint("src/models/**") == "src/models/**"
     assert sanitize_path_hint("migrations/**") == "migrations/**"

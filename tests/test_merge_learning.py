@@ -28,6 +28,10 @@ def _staged_llm_complete(cluster_payload: dict | str):
     cluster_json = (
         cluster_payload if isinstance(cluster_payload, str) else json.dumps(cluster_payload)
     )
+    medium_body = (
+        "When the review preference applies, follow the approach called out in the "
+        "comment and match the same pattern on similar call sites in the diff."
+    )
 
     async def _complete(**kwargs):
         prompt = kwargs["messages"][0]["content"]
@@ -39,9 +43,7 @@ def _staged_llm_complete(cluster_payload: dict | str):
                         {
                             "index": idx,
                             "title": "Apply the team pattern",
-                            "body": (
-                                "Follow the rejected approach replacement called out in review."
-                            ),
+                            "body": medium_body,
                             "path_hint": "",
                             "prs": [],
                         }
@@ -52,6 +54,14 @@ def _staged_llm_complete(cluster_payload: dict | str):
         return cluster_json
 
     return _complete
+
+
+def _medium_body(title: str) -> str:
+    """Inject-fitted Medium body (≥120 chars) for synth mocks."""
+    return (
+        f"When this preference applies in a diff, prefer: {title}. "
+        "Match the same approach on similar call sites rather than inventing a one-off."
+    )
 
 
 def _create(
@@ -66,7 +76,7 @@ def _create(
     out: dict = {
         "action": "create",
         "title": title,
-        "body": body or f"{title}.",
+        "body": body if body is not None else _medium_body(title),
         "evidence_count": evidence_count,
         "path_hint": path_hint,
     }
@@ -532,7 +542,7 @@ class TestSynthesizeFromHumanReviews:
                     {
                         "action": "create",
                         "title": "Catch specific exceptions",
-                        "body": "Prefer named exception types over bare except.",
+                        "body": _medium_body("Catch specific exceptions"),
                         "evidence_count": 3,
                         "prs": [1, 2, 3],
                     }
@@ -568,8 +578,8 @@ class TestSynthesizeFromHumanReviews:
                         "action": "create",
                         "title": "Wrap multi-write requests in a transaction",
                         "body": (
-                            "Wrap related DB writes in a single transaction instead of "
-                            "partial commits."
+                            "When a request performs related database writes, wrap them in a "
+                            "single transaction instead of partial commits that leave inconsistent state."
                         ),
                         "evidence_count": 3,
                         "prs": [1, 2],
@@ -577,14 +587,17 @@ class TestSynthesizeFromHumanReviews:
                     {
                         "action": "create",
                         "title": "Use camelCase for consistency",
-                        "body": "Prefer camelCase.",
+                        "body": (
+                            "When naming variables and methods in application code, prefer "
+                            "camelCase so identifiers stay consistent with the rest of the codebase."
+                        ),
                         "evidence_count": 2,
                     },
                 ]
             }
         )
         n = await synthesize_from_human_reviews(store, llm)
-        # Soft conventions are kept (admins filter); both creates land.
+        # Soft conventions are kept when Medium body passes; both creates land.
         assert n == 2
         human = [r for r in store.list_learned_rules() if r.source_signal == "human_pattern"]
         assert len(human) == 2
@@ -595,6 +608,7 @@ class TestSynthesizeFromHumanReviews:
         prompts = [c.kwargs["messages"][0]["content"] for c in llm.complete.await_args_list]
         assert any('"title"' in p for p in prompts)
         assert any('"body"' in p for p in prompts)
+        assert any("seed anti-examples" in p.lower() or "Do not extract similar" in p for p in prompts)
 
     @pytest.mark.asyncio
     async def test_new_synth_adds_rules_without_overwriting_approved(self, store):
@@ -849,7 +863,10 @@ class TestSynthesizeFromHumanReviews:
                 "actions": [
                     _create(
                         "Flag bare except",
-                        body="Catch named exceptions instead of bare except.",
+                        body=(
+                            "When catching errors in application code, catch named exception "
+                            "types instead of bare except so failures stay diagnosable."
+                        ),
                         evidence_count=2,
                     )
                 ]
@@ -875,10 +892,14 @@ class TestSynthesizeFromHumanReviews:
                 signal="human_review",
                 actor="u",
             )
+        rejected_body = (
+            "When catching errors in application code, catch named exception types "
+            "instead of bare except so failures stay diagnosable in production."
+        )
         rejected = store.upsert_learned_rule(
             rule_text=pack_learned_rule(
                 "Flag bare except clauses",
-                "Catch named exceptions.",
+                rejected_body,
             ),
             source_signal="human_pattern",
             category="human_review",
@@ -893,7 +914,7 @@ class TestSynthesizeFromHumanReviews:
                 "actions": [
                     _create(
                         "Flag bare except clauses",
-                        body="Catch named exceptions.",
+                        body=rejected_body,
                         evidence_count=3,
                     )
                 ]
@@ -902,6 +923,166 @@ class TestSynthesizeFromHumanReviews:
         assert await synthesize_from_human_reviews(store, llm) == 0
         pending = [r for r in store.list_learned_rules() if r.status == "pending"]
         assert pending == []
+
+    @pytest.mark.asyncio
+    async def test_thin_or_mush_create_skipped(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i,
+                pr_url=f"https://x/{i}",
+                comment_path="a.py",
+                comment_line=1,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"c{i}",
+                signal="human_review",
+                actor="u",
+            )
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {
+                "actions": [
+                    _create("Too thin", body="Prefer empty().", evidence_count=2),
+                    _create(
+                        "Filter based on environment if necessary",
+                        body=(
+                            "Check if filtering based on the `$environment` variable "
+                            "is required in the context of this query helper."
+                        ),
+                        evidence_count=2,
+                    ),
+                ]
+            }
+        )
+        assert await synthesize_from_human_reviews(store, llm) == 0
+
+    @pytest.mark.asyncio
+    async def test_question_source_dropped_at_extract(self, store):
+        store.record_feedback(
+            pr_number=1,
+            pr_url="https://x/1",
+            comment_path="src/models/panel.py",
+            comment_line=75,
+            comment_category="human_review",
+            comment_severity="",
+            comment_title="should we filter by $environment here?",
+            signal="human_review",
+            actor="alice",
+        )
+        store.record_feedback(
+            pr_number=2,
+            pr_url="https://x/2",
+            comment_path="a.py",
+            comment_line=1,
+            comment_category="human_review",
+            comment_severity="",
+            comment_title="Please wrap multi-write paths in a transaction.",
+            signal="human_review",
+            actor="alice",
+        )
+
+        async def _complete(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            if "extract one titled coding rule" in prompt:
+                assert "Do not extract similar" in prompt
+                idxs = [int(m) for m in re.findall(r"^### (\d+) —", prompt, re.M)]
+                return json.dumps(
+                    {
+                        "extractions": [
+                            {
+                                "index": idx,
+                                "title": "Filter based on environment if necessary",
+                                "body": _medium_body("Filter based on environment"),
+                                "path_hint": "",
+                                "prs": [],
+                            }
+                            for idx in idxs
+                        ]
+                    }
+                )
+            return json.dumps({"actions": []})
+
+        llm = AsyncMock()
+        llm.complete.side_effect = _complete
+        assert await synthesize_from_human_reviews(store, llm) == 0
+
+    @pytest.mark.asyncio
+    async def test_path_hint_persists_on_create(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i + 1,
+                pr_url=f"https://x/{i + 1}",
+                comment_path="migrations/x.sql",
+                comment_line=1,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"add indexes on filter columns #{i}",
+                signal="human_review",
+                actor="u",
+            )
+        llm = AsyncMock()
+        llm.complete.side_effect = _staged_llm_complete(
+            {
+                "actions": [
+                    _create(
+                        "Add indexes to analytics migration tables",
+                        body=(
+                            "When creating migration tables for analytics or synced data, "
+                            "add indexes on columns used in WHERE, JOIN, or ORDER BY clauses."
+                        ),
+                        evidence_count=2,
+                        path_hint="migrations/**",
+                        prs=[1, 2],
+                    )
+                ]
+            }
+        )
+        assert await synthesize_from_human_reviews(store, llm) == 1
+        human = [r for r in store.list_learned_rules() if r.source_signal == "human_pattern"]
+        assert len(human) == 1
+        assert human[0].path_pattern.startswith("migrations/**::__human_")
+
+    @pytest.mark.asyncio
+    async def test_rejected_appears_in_extract_prompt(self, store):
+        for i in range(3):
+            store.record_feedback(
+                pr_number=i,
+                pr_url=f"https://x/{i}",
+                comment_path="a.py",
+                comment_line=1,
+                comment_category="human_review",
+                comment_severity="",
+                comment_title=f"c{i}",
+                signal="human_review",
+                actor="u",
+            )
+        store.upsert_learned_rule(
+            rule_text=pack_learned_rule(
+                "Append zip suffix",
+                _medium_body("Append zip suffix"),
+            ),
+            source_signal="human_pattern",
+            category="human_review",
+            path_pattern="__human_rej2__",
+            sample_count=1,
+            status="rejected",
+        )
+        seen: list[str] = []
+
+        async def _complete(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            seen.append(prompt)
+            if "extract one titled coding rule" in prompt:
+                return json.dumps({"extractions": []})
+            return json.dumps({"actions": []})
+
+        llm = AsyncMock()
+        llm.complete.side_effect = _complete
+        await synthesize_from_human_reviews(store, llm)
+        extract_prompts = [p for p in seen if "extract one titled coding rule" in p]
+        assert extract_prompts
+        assert any("Append zip suffix" in p for p in extract_prompts)
+        assert any("Rejected rules" in p for p in extract_prompts)
 
     @pytest.mark.asyncio
     async def test_bad_json_returns_zero(self, store):

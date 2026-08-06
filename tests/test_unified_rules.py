@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from mira.dashboard import api
 from mira.dashboard.db import AppDatabase, User
@@ -44,7 +45,8 @@ def test_catalog_includes_written_and_approved_learned(patched_db: AppDatabase):
     ur.create_unified_rule(
         api.UnifiedRuleCreate(
             kind="learned",
-            text="Prefer Alpine",
+            title="Prefer Alpine",
+            text="Use Alpine.js for small client interactions.",
             owner="acme",
             repo="web",
         ),
@@ -54,7 +56,8 @@ def test_catalog_includes_written_and_approved_learned(patched_db: AppDatabase):
     ur.create_unified_rule(
         api.UnifiedRuleCreate(
             kind="learned",
-            text="Pending only",
+            title="Pending only",
+            text="This pending learning should stay in Pending.",
             owner="acme",
             repo="web",
         ),
@@ -67,21 +70,27 @@ def test_catalog_includes_written_and_approved_learned(patched_db: AppDatabase):
     assert "written_repo" in kinds
     assert "learned" in kinds
     assert all(r.status == "approved" for r in catalog if r.kind == "learned")
-    assert not any(r.text == "Pending only" for r in catalog)
+    assert not any(r.title == "Pending only" for r in catalog)
 
     inbox = ur.list_unified_rules(mode="pending")
-    assert any(r.text == "Pending only" for r in inbox)
+    assert any(r.title == "Pending only" for r in inbox)
     assert all(r.kind == "learned" and r.status == "pending" for r in inbox)
 
     # Kind filter must not empty the inbox (pending is always learned).
     inbox_filtered = ur.list_unified_rules(mode="pending", kind="written_repo")
-    assert any(r.text == "Pending only" for r in inbox_filtered)
+    assert any(r.title == "Pending only" for r in inbox_filtered)
 
 
 def test_mode_aliases_inbox_catalog(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
     ur.create_unified_rule(
-        api.UnifiedRuleCreate(kind="learned", text="Alias check", owner="acme", repo="web"),
+        api.UnifiedRuleCreate(
+            kind="learned",
+            title="Alias check",
+            text="Mode aliases should map inbox to pending.",
+            owner="acme",
+            repo="web",
+        ),
         _Req(False, "junior"),
     )
     assert len(ur.list_unified_rules(mode="inbox")) == len(ur.list_unified_rules(mode="pending"))
@@ -91,7 +100,13 @@ def test_mode_aliases_inbox_catalog(patched_db: AppDatabase):
 def test_approve_moves_pending_to_active(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
     created = ur.create_unified_rule(
-        api.UnifiedRuleCreate(kind="learned", text="Ship it", owner="acme", repo="web"),
+        api.UnifiedRuleCreate(
+            kind="learned",
+            title="Ship it",
+            text="Approve moves pending learnings into Active.",
+            owner="acme",
+            repo="web",
+        ),
         _Req(False, "junior"),
     )
     assert created.status == "pending"
@@ -109,7 +124,13 @@ def test_approve_moves_pending_to_active(patched_db: AppDatabase):
 def test_set_enabled_learned(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
     created = ur.create_unified_rule(
-        api.UnifiedRuleCreate(kind="learned", text="Toggle me", owner="acme", repo="web"),
+        api.UnifiedRuleCreate(
+            kind="learned",
+            title="Toggle me",
+            text="Enabled flag can be toggled on approved learnings.",
+            owner="acme",
+            repo="web",
+        ),
         _Req(True),
     )
     disabled = ur.set_unified_rule_enabled(
@@ -133,7 +154,11 @@ def test_learned_scope_fanout_groups_list(patched_db: AppDatabase):
     patched_db.register_repo("acme", "api")
     created = ur.create_unified_rule(
         api.UnifiedRuleCreate(
-            kind="learned", text="Use #[Locked] on immutable props", owner="acme", repo="web"
+            kind="learned",
+            title="Lock immutable props",
+            text="Use #[Locked] on immutable props",
+            owner="acme",
+            repo="web",
         ),
         _Req(False, "junior"),
     )
@@ -143,6 +168,7 @@ def test_learned_scope_fanout_groups_list(patched_db: AppDatabase):
             id=created.id,
             owner="acme",
             repo="web",
+            title="Lock immutable props",
             text="Use #[Locked] on immutable props",
             scope="repos",
             scope_repos=[
@@ -171,7 +197,11 @@ def test_learned_promote_to_global(patched_db: AppDatabase):
     patched_db.register_repo("acme", "web")
     created = ur.create_unified_rule(
         api.UnifiedRuleCreate(
-            kind="learned", text="Prefer enums over magic strings", owner="acme", repo="web"
+            kind="learned",
+            title="Enums",
+            text="Prefer enums over magic strings",
+            owner="acme",
+            repo="web",
         ),
         _Req(False, "junior"),
     )
@@ -215,3 +245,68 @@ def test_written_global_to_repo(patched_db: AppDatabase):
     assert moved.kind == "written_repo"
     assert moved.owner == "acme"
     assert moved.repo == "web"
+
+
+def test_clear_pending_deletes_auto_keeps_remember(patched_db: AppDatabase):
+    from mira.analysis.learned_rules import pack_learned_rule
+
+    patched_db.register_repo("acme", "web")
+    patched_db.register_repo("acme", "api")
+    store_web = IndexStore.open("acme", "web")
+    auto = store_web.upsert_learned_rule(
+        rule_text=pack_learned_rule(
+            "Auto mush",
+            "When reviewing, this auto-synth pending row should be cleared by the bulk action.",
+        ),
+        source_signal="human_pattern",
+        category="human_review",
+        path_pattern="__human_auto__",
+        sample_count=1,
+        status="pending",
+    )
+    remember = store_web.create_learned_rule(
+        rule_text=pack_learned_rule(
+            "Remember tip",
+            "Hand-authored pending should survive clear-pending for smoke testing.",
+        ),
+        source_signal="human_pattern",
+        category="other",
+        path_pattern="",
+        sample_count=1,
+        status="pending",
+        created_by="alice",
+    )
+    store_web.close()
+    store_api = IndexStore.open("acme", "api")
+    other = store_api.upsert_learned_rule(
+        rule_text=pack_learned_rule(
+            "Other repo auto",
+            "Auto pending on another repo should clear when scope is org-wide.",
+        ),
+        source_signal="human_pattern",
+        category="human_review",
+        path_pattern="__human_api__",
+        sample_count=1,
+        status="pending",
+    )
+    store_api.close()
+
+    with pytest.raises(HTTPException) as exc:
+        ur.clear_pending_learned_rules(_Req(False), repo=None)
+    assert exc.value.status_code == 403
+
+    cleared_web = ur.clear_pending_learned_rules(_Req(True), repo="acme/web")
+    assert cleared_web["cleared"] == 1
+    store_web = IndexStore.open("acme", "web")
+    assert store_web.get_learned_rule(auto.id) is None
+    assert store_web.get_learned_rule(remember.id) is not None
+    store_web.close()
+    store_api = IndexStore.open("acme", "api")
+    assert store_api.get_learned_rule(other.id) is not None
+    store_api.close()
+
+    cleared_all = ur.clear_pending_learned_rules(_Req(True), repo=None)
+    assert cleared_all["cleared"] == 1
+    store_api = IndexStore.open("acme", "api")
+    assert store_api.get_learned_rule(other.id) is None
+    store_api.close()

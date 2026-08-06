@@ -64,6 +64,15 @@ export const rulesApi = {
   rejectUnifiedRule: (body: UnifiedRuleRef) =>
     postJson<{ ok: boolean }>("/api/rules/reject", body),
 
+  /** Delete auto-synth Pending learnings (keeps @remember). Optional owner/repo. */
+  clearPendingLearnings: (repo?: string) => {
+    const qs =
+      repo && repo !== "__all__"
+        ? `?repo=${encodeURIComponent(repo)}`
+        : ""
+    return postJson<{ cleared: number }>(`/api/rules/clear-pending${qs}`, {})
+  },
+
   setUnifiedRuleEnabled: (body: UnifiedRuleRef & { enabled: boolean }) =>
     patchJson<UnifiedRule>("/api/rules/enabled", body),
 

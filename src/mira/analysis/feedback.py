@@ -8,12 +8,14 @@ import time
 from collections import defaultdict
 
 from mira.analysis.learned_rules import (
+    body_passes_synth_gate,
     find_near_duplicate_rule,
     human_pattern_path,
     normalize_rule_text,
     pack_learned_rule,
     rule_text_from_synth_action,
     sanitize_path_hint,
+    unpack_learned_rule,
 )
 from mira.index.store import IndexStore
 
@@ -502,6 +504,9 @@ async def synthesize_from_human_reviews(
         if action != "create":
             continue
         if not rule_text:
+            continue
+        title, body = unpack_learned_rule(rule_text)
+        if not body_passes_synth_gate(title, body):
             continue
         evidence = int(item.get("evidence_count") or 0)
         if _apply_create(

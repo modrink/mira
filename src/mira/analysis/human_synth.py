@@ -12,6 +12,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader
 
 from mira.analysis.learned_rules import (
+    body_passes_synth_gate,
     rule_text_from_synth_action,
     sanitize_path_hint,
     unpack_learned_rule,
@@ -24,6 +25,28 @@ _TEMPLATE_DIR = Path(__file__).parent.parent / "llm" / "prompts" / "templates"
 
 _EXTRACT_CAP = int(os.environ.get("MIRA_HUMAN_SYNTH_EXTRACT_CAP", "80"))
 _EXTRACT_BATCH = int(os.environ.get("MIRA_HUMAN_SYNTH_EXTRACT_BATCH", "10"))
+_REJECTED_PROMPT_CAP = 20
+_REJECTED_TEXT_CHARS = 200
+
+# Cold-start anti-examples (failure classes). Shown even with empty rejected catalog.
+_SEED_ANTI_EXAMPLES: list[dict[str, str]] = [
+    {
+        "class": "clarifying question",
+        "example": "Should we filter by $environment here?",
+    },
+    {
+        "class": "one-shot file chore",
+        "example": "Append '.zip' to this path if it is missing.",
+    },
+    {
+        "class": "non-actionable hedge",
+        "example": "Check if filtering is required in the context.",
+    },
+    {
+        "class": "title paraphrase",
+        "example": "Use empty() for readability. Prefer empty() for better readability.",
+    },
+]
 
 ProgressCb = Callable[[dict[str, Any]], None]
 
@@ -95,10 +118,31 @@ def _comments_for_extract(comments: list[dict], *, cap: int) -> list[dict]:
     return chosen
 
 
+def _rejected_for_prompt(rejected: list[dict] | None) -> list[dict]:
+    """Newest-first cap; truncate rule_text for prompt budget."""
+    rows = list(rejected or [])
+    # Prefer higher ids when present (newer rows).
+    rows.sort(key=lambda r: int(r.get("id") or 0), reverse=True)
+    out: list[dict] = []
+    for row in rows[:_REJECTED_PROMPT_CAP]:
+        text = str(row.get("rule_text") or "").strip()
+        if not text:
+            continue
+        if len(text) > _REJECTED_TEXT_CHARS:
+            text = text[:_REJECTED_TEXT_CHARS].rstrip() + "…"
+        out.append({"id": row.get("id"), "rule_text": text})
+    return out
+
+
+def _source_is_question(body: str) -> bool:
+    return (body or "").strip().endswith("?")
+
+
 async def extract_candidates(
     llm: Any,
     comments: list[dict],
     *,
+    rejected: list[dict] | None = None,
     on_progress: ProgressCb | None = None,
 ) -> tuple[list[dict], int]:
     """Structured extract + pack/gate.
@@ -110,13 +154,18 @@ async def extract_candidates(
     env = _jinja_env()
     template = env.get_template("synthesize_extract.jinja2")
     by_index = {int(c["index"]): c for c in comments}
+    rejected_prompt = _rejected_for_prompt(rejected)
     survivors: list[dict] = []
     dropped = 0
     total = len(comments)
     _emit(on_progress, phase="extract", extract_done=0, extract_total=total)
     for start in range(0, len(comments), max(1, _EXTRACT_BATCH)):
         batch = comments[start : start + _EXTRACT_BATCH]
-        prompt = template.render(comments=batch)
+        prompt = template.render(
+            comments=batch,
+            seed_anti_examples=_SEED_ANTI_EXAMPLES,
+            rejected=rejected_prompt,
+        )
         data = await _llm_json(llm, prompt)
         if data:
             extractions = data.get("extractions")
@@ -131,6 +180,9 @@ async def extract_candidates(
                     src = by_index.get(idx)
                     if src is None:
                         continue
+                    if _source_is_question(str(src.get("body") or "")):
+                        dropped += 1
+                        continue
                     prs = item.get("prs")
                     if not isinstance(prs, list) or not prs:
                         prn = int(src.get("pr_number") or 0)
@@ -140,6 +192,9 @@ async def extract_candidates(
                         dropped += 1
                         continue
                     title, body = unpack_learned_rule(rule_text)
+                    if not body_passes_synth_gate(title, body):
+                        dropped += 1
+                        continue
                     survivors.append(
                         {
                             "id": len(survivors) + 1,
@@ -185,7 +240,8 @@ async def cluster_candidates(
     prompt = template.render(
         extractions=extractions,
         catalog=catalog,
-        rejected=rejected or [],
+        rejected=_rejected_for_prompt(rejected),
+        seed_anti_examples=_SEED_ANTI_EXAMPLES,
         max_rules=max_rules,
     )
     data = await _llm_json(llm, prompt)
@@ -213,7 +269,12 @@ async def run_staged_human_synth(
 
     cap = _EXTRACT_CAP if extract_cap is None else extract_cap
     to_extract = _comments_for_extract(comments, cap=max(1, cap))
-    survivors, dropped = await extract_candidates(llm, to_extract, on_progress=on_progress)
+    survivors, dropped = await extract_candidates(
+        llm,
+        to_extract,
+        rejected=rejected,
+        on_progress=on_progress,
+    )
     logger.info(
         "Human synth extract: attempted=%d survived=%d dropped_gate=%d",
         len(to_extract),

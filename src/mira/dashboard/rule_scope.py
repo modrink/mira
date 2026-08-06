@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from typing import Any
@@ -11,6 +12,7 @@ from fastapi import HTTPException
 from mira.dashboard.api import RuleCreate, ScopeRepoRef, UnifiedRule, _open_store
 from mira.dashboard.routers import rules as legacy
 
+logger = logging.getLogger(__name__)
 
 def _repo_key(platform: str, owner: str, repo: str) -> str:
     return f"{platform or 'github'}|{owner}/{repo}"
@@ -141,6 +143,65 @@ def fanout_learned_active(copies: list[dict], active: bool) -> None:
 
 def fanout_learned_delete(copies: list[dict]) -> None:
     _for_each_copy(copies, lambda store, rid: store.delete_learned_rule(rid))
+
+
+def clear_pending_auto_synth(*, owner: str = "", repo: str = "") -> int:
+    """Delete auto-synthesized pending human_pattern rows (keep @remember / manual).
+
+    Optional ``owner``+``repo`` limits to one repo. Returns product-row count cleared
+    (grouped rules count once). Does **not** reject — clean slate for re-synth tests.
+    """
+    rows = _list_org_learned_raw("pending")
+    seen_groups: set[str] = set()
+    cleared = 0
+    for r in rows:
+        if str(r.get("source_signal") or "") != "human_pattern":
+            continue
+        if str(r.get("created_by") or "").strip():
+            continue
+        row_owner = str(r.get("owner") or "")
+        row_repo = str(r.get("repo") or "")
+        if owner:
+            if row_owner != owner or row_repo != repo:
+                continue
+        platform = str(r.get("platform") or "github")
+        rid = int(r.get("id") or 0)
+        if rid <= 0:
+            continue
+        gid = str(r.get("group_id") or "").strip()
+        if gid:
+            if gid in seen_groups:
+                continue
+            seen_groups.add(gid)
+            copies = find_learned_copies(
+                owner=row_owner,
+                repo=row_repo,
+                platform=platform,
+                rule_id=rid,
+                group_id=gid,
+            )
+            fanout_learned_delete(
+                copies
+                or [
+                    {
+                        "owner": row_owner,
+                        "repo": row_repo,
+                        "platform": platform,
+                        "id": rid,
+                    }
+                ]
+            )
+        else:
+            with _open_store(row_owner, row_repo, platform=platform) as store:
+                store.delete_learned_rule(rid)
+        cleared += 1
+    if cleared:
+        logger.info(
+            "Cleared %d pending auto-synth learnings%s",
+            cleared,
+            f" for {owner}/{repo}" if owner else " (org-wide)",
+        )
+    return cleared
 
 
 def promote_learned_to_global(

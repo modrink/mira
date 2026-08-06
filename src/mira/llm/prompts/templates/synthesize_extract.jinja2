@@ -7,7 +7,7 @@ Respond in JSON only. No markdown fences.
     {
       "index": 1,
       "title": "short imperative title (≤80 chars)",
-      "body": "1–3 sentences: when this applies, preferred approach, and any concrete cue to flag in a diff",
+      "body": "when this applies, preferred approach, and a concrete cue to match in a diff (~120–400 chars)",
       "path_hint": "directory glob only (e.g. src/** or migrations/**), or \"\"",
       "prs": [1201]
     }
@@ -15,18 +15,35 @@ Respond in JSON only. No markdown fences.
 }
 
 Rules:
-- Soft / org conventions are fine. Admins will approve or reject later.
-- Put concrete cues (token, call, pattern) in the body when the comment has them.
-- When a code hunk is present, you may quote short before/after fences in body. Omit rather than invent.
-- Title: imperative when possible. Soft titles OK.
-- Do not invent package names or APIs absent from the comment/hunk.
-- Omit from `extractions` only when there is no coding guidance (pure question / LGTM / workflow).
+- Soft / org conventions that assert a preference are fine. Admins approve or reject later.
+- Body must be useful to a review engine: applicability + preferred approach + ≥1 concrete cue (API, call, token, pattern). Aim ~120–400 characters.
+- Short before/after code fences are optional when a hunk is present. Omit rather than invent. Do not invent package names or APIs absent from the comment/hunk.
+- Title: imperative when possible.
+- Omit from `extractions` when:
+  - clarifying / rhetorical question (any language), “should we…?”, confirmation-seeking
+  - LGTM / workflow / pure discussion with no stated preference
+  - one-shot local chore that only applies to one call site or one literal path tip
+  - non-actionable hedges (“check if”, “if necessary”, “consider whether”)
 
 `path_hint`:
-- Prefer `""` (repo-wide).
-- Only set a shallow directory glob (≤2 segments) when the preference is inherently area-bound.
-- NEVER copy the comment's deep folder. NEVER a single filename.
+- When the preference is inherently area-bound (e.g. only migrations, only UI views, only jobs/workers), set a shallow directory glob (≤2 segments) taken from that area — e.g. `migrations/**`, `src/api/**`, `tests/**`.
+- True cross-cutting conventions → `""`.
+- NEVER copy the comment's deep folder. NEVER a single filename. Do not invent framework-specific roots.
 `prs` = that comment's PR number when known.
+
+## Do not extract similar classes (seed anti-examples)
+
+{% for s in seed_anti_examples %}
+- {{ s.class }}: {{ s.example }}
+{% endfor %}
+
+{% if rejected %}
+## Rejected rules (do not extract the same class or near-duplicates)
+
+{% for r in rejected %}
+- {{ r.rule_text }}
+{% endfor %}
+{% endif %}
 
 ## Comments
 

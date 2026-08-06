@@ -8,6 +8,7 @@ import {
   Power,
   RefreshCw,
   Search,
+  Trash2,
   X,
 } from "lucide-react"
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react"
@@ -374,6 +375,30 @@ export function RulesPage() {
     }
   }
 
+  const onClearPending = async () => {
+    try {
+      const result = await api.clearPendingLearnings(
+        repoFilter === ALL ? undefined : repoFilter,
+      )
+      toast.success(
+        result.cleared === 0
+          ? "No auto-synth Pending to clear"
+          : `Cleared ${result.cleared} Pending`,
+        {
+          description:
+            "@remember / hand-authored Pending kept. Reject is separate — use for teaching synth.",
+        },
+      )
+      setPanelOpen(false)
+      setSelected(null)
+      refresh()
+    } catch (e) {
+      toast.error("Clear Pending failed", {
+        description: e instanceof Error ? e.message : String(e),
+      })
+    }
+  }
+
   const columns: Column<UnifiedRule>[] = useMemo(
     () => [
       {
@@ -491,6 +516,28 @@ export function RulesPage() {
                 >
                   <History className="mr-1 h-4 w-4" /> Backfill
                 </Button>
+                {mode === "pending" ? (
+                  <ConfirmButton
+                    size="sm"
+                    variant="outline"
+                    destructive
+                    dialogTitle={
+                      repoFilter === ALL
+                        ? "Clear all auto-synth Pending?"
+                        : `Clear Pending for ${repoFilter}?`
+                    }
+                    dialogDescription="Deletes auto-synthesized Pending learnings. Keeps @remember / hand-authored. Does not reject (rejected rules teach the next Rebuild)."
+                    confirmLabel="Clear Pending"
+                    onConfirm={onClearPending}
+                    title={
+                      repoFilter === ALL
+                        ? "Delete all auto-synth Pending learnings"
+                        : `Delete auto-synth Pending for ${repoFilter}`
+                    }
+                  >
+                    <Trash2 className="mr-1 h-4 w-4" /> Clear Pending
+                  </ConfirmButton>
+                ) : null}
               </>
             )}
             <Button size="sm" onClick={() => navigate("/rules/new")}>
