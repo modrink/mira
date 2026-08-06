@@ -333,8 +333,6 @@ def sync_learned_repos(
             anchor = c
 
     assert anchor is not None
-    from mira.analysis.learned_rules import strip_synth_rationale
-
     repos = sorted({f"{c['owner']}/{c['repo']}" for c in existing_by_key.values()})
     return UnifiedRule(
         id=int(anchor["id"]),
@@ -342,7 +340,7 @@ def sync_learned_repos(
         owner=str(anchor["owner"]),
         repo=str(anchor["repo"]),
         platform=str(anchor.get("platform") or "github"),
-        text=strip_synth_rationale(text),
+        text=text,
         enabled=bool(anchor.get("active", True)),
         status=str(anchor.get("status") or status),
         category=category,

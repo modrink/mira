@@ -6,7 +6,7 @@ import {
   learningJobStatusLine,
   newPrCount,
   repoKey,
-  type BackfillStatus,
+  type LearningJobStatus,
 } from "@/components/dashboard/learning-job-status"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -29,7 +29,7 @@ import {
 import { api, type RepoListItem } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
-export type { BackfillStatus }
+export type { LearningJobStatus }
 export { newPrCount }
 
 function isGithub(r: RepoListItem) {
@@ -58,7 +58,7 @@ export function LearningBackfillDialog({
   const [submitting, setSubmitting] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [statuses, setStatuses] = useState<BackfillStatus[]>([])
+  const [statuses, setStatuses] = useState<LearningJobStatus[]>([])
   const [estimate, setEstimate] = useState<{
     estimated_usd: number
     input_tokens: number
@@ -258,7 +258,7 @@ export function LearningBackfillDialog({
   }
 
   const statusByKey = useMemo(() => {
-    const m = new Map<string, BackfillStatus>()
+    const m = new Map<string, LearningJobStatus>()
     for (const s of statuses) m.set(repoKey(s.owner, s.repo), s)
     return m
   }, [statuses])
@@ -383,9 +383,9 @@ export function LearningBackfillDialog({
                           Out: {estimate.output_tokens.toLocaleString()} tokens
                         </div>
                         <div className="pt-1 text-muted-foreground">
-                          Synth calls = repos with enough feedback for LLM
-                          (multi-stage classify/extract/cluster). Cold repos
-                          assume a mid-size sample from max PRs. GitHub API free.
+                          Synth calls = repos with enough feedback for LLM.
+                          Cold repos assume a mid-size sample from max PRs.
+                          GitHub API free.
                         </div>
                       </div>
                     </TooltipContent>

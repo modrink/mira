@@ -78,8 +78,8 @@ def estimate_learnings_backfill_cost(
     """Estimate LLM cost of learnings backfill.
 
     PR ingest is GitHub API only. LLM cost is staged synthesis per repo that
-    has enough human_review signal (classify batches + extract batches + one
-    cluster call; worst case: every repo).
+    has enough human_review signal (extract batches + one cluster call;
+    worst case: every repo).
 
     Pass ``synth_calls`` when known from store stats; otherwise assume one
     *repo* synth (token averages should reflect the staged pipeline).
@@ -117,13 +117,12 @@ def estimate_repo_synth_tokens(
     Uses stored feedback when present; for cold repos assumes a mid-size sample
     proportional to ``max_prs`` (backfill will ingest new human comments).
 
-    Stages: batch classify + capped extract + one catalog cluster call.
+    Stages: capped extract + one catalog cluster call.
     """
     # Caps match mira.analysis.feedback / human_synth defaults.
     max_comments = 100
-    max_rules = 20
-    extract_cap = 40
-    classify_batch = 25
+    max_rules = 40
+    extract_cap = 80
     extract_batch = 10
 
     projected = human_review_count
@@ -135,16 +134,13 @@ def estimate_repo_synth_tokens(
 
     comments = min(max_comments, projected)
     extracts = min(extract_cap, comments)
-    classify_calls = max(1, (comments + classify_batch - 1) // classify_batch)
     extract_calls = max(1, (extracts + extract_batch - 1) // extract_batch)
 
-    # classify: short prompt + comment bodies; extract: structured fields; cluster: catalog.
     input_tokens = (
-        classify_calls * (800 + classify_batch * 90)
-        + extract_calls * (1_000 + extract_batch * 160)
+        extract_calls * (1_000 + extract_batch * 160)
         + (2_200 + extracts * 70 + max(0, catalog_count) * 45)
     )
-    output_tokens = classify_calls * 120 + extract_calls * 350 + (400 + max_rules * 180)
+    output_tokens = extract_calls * 350 + (400 + max_rules * 180)
     return input_tokens, output_tokens
 
 

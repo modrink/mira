@@ -454,7 +454,7 @@ export function RuleFormPage() {
                 </div>
               )}
 
-              {(isWritten || (isEdit && scopeMode === "global")) && (
+              {(isWritten || kind === "learned") && (
                 <div className="space-y-2">
                   <label className="text-sm font-medium" htmlFor="rule-title">
                     Title

@@ -13,17 +13,11 @@ export type LearningJobStatus = {
   max_prs?: number
   skipped?: number
   updated_at?: number
-  classify_done?: number
-  classify_total?: number
   extract_done?: number
   extract_total?: number
   llm_rules?: number
   deterministic_rules?: number
-  upserted?: number
 }
-
-/** @deprecated alias — prefer LearningJobStatus */
-export type BackfillStatus = LearningJobStatus
 
 export function repoKey(owner: string, repo: string) {
   return `${owner}/${repo}`
@@ -45,11 +39,6 @@ export function isSynthJob(st: LearningJobStatus): boolean {
 
 export function synthPhaseLine(st: LearningJobStatus): string {
   const phase = st.phase || ""
-  if (phase === "classify") {
-    const done = st.classify_done ?? 0
-    const total = st.classify_total ?? 0
-    return total > 0 ? `Classifying… ${done}/${total}` : "Classifying…"
-  }
   if (phase === "extract") {
     const done = st.extract_done ?? 0
     const total = st.extract_total ?? 0
@@ -59,7 +48,7 @@ export function synthPhaseLine(st: LearningJobStatus): string {
     return "Clustering…"
   }
   if (phase === "complete") {
-    const rules = st.llm_rules ?? st.upserted
+    const rules = st.llm_rules
     return rules != null ? `Complete · ${rules} rules` : "Complete"
   }
   if (phase === "synth" || phase === "queued") {
@@ -81,12 +70,7 @@ export function learningJobStatusLine(st: LearningJobStatus): string {
     return maxHint ? `Queued · ${maxHint}` : "Queued"
   }
   if (st.status === "running") {
-    if (
-      synth ||
-      phase === "classify" ||
-      phase === "extract" ||
-      phase === "cluster"
-    ) {
+    if (synth || phase === "extract" || phase === "cluster") {
       return synthPhaseLine(st)
     }
     if (phase === "listing") {
@@ -103,7 +87,7 @@ export function learningJobStatusLine(st: LearningJobStatus): string {
   }
   if (st.status === "complete") {
     if (synth) {
-      const rules = st.llm_rules ?? st.upserted ?? 0
+      const rules = st.llm_rules ?? 0
       return `Rebuild complete · ${rules} rules`
     }
     return `Complete · ${done} PRs · ${neu} new · ${skipped} skipped`

@@ -9,12 +9,11 @@ from collections import defaultdict
 
 from mira.analysis.learned_rules import (
     find_near_duplicate_rule,
-    human_pattern_key,
     human_pattern_path,
     normalize_rule_text,
+    pack_learned_rule,
     rule_text_from_synth_action,
     sanitize_path_hint,
-    strip_synth_rationale,
 )
 from mira.index.store import IndexStore
 
@@ -27,16 +26,12 @@ _MIN_REJECTS_CATEGORY = int(os.environ.get("MIRA_FEEDBACK_MIN_CAT", "5"))
 # Max human-review comments to include in a single LLM synthesis call.
 _MAX_HUMAN_COMMENTS = int(os.environ.get("MIRA_HUMAN_SYNTH_MAX", "100"))
 # Max catalog actions the LLM is allowed to emit per synthesis run.
-_MAX_LLM_RULES = int(os.environ.get("MIRA_HUMAN_SYNTH_MAX_RULES", "8"))
+_MAX_LLM_RULES = int(os.environ.get("MIRA_HUMAN_SYNTH_MAX_RULES", "40"))
 # How many feedback rows to load before filtering humans (accept/reject noise).
 _FEEDBACK_FETCH_LIMIT = int(os.environ.get("MIRA_HUMAN_SYNTH_FETCH", "2000"))
 # Live-merge LLM synth cooldown (seconds). Deterministic reject synth always runs.
 _LLM_SYNTH_COOLDOWN_SEC = int(os.environ.get("MIRA_LEARN_SYNTH_COOLDOWN_SEC", "3600"))
 _LLM_SYNTH_SIGNAL = "learn_synth"
-
-# Back-compat aliases for older imports / tests.
-_normalize_human_rule_text = normalize_rule_text
-_human_pattern_key = human_pattern_key
 
 # Pack diff hunk into feedback comment_title for synth (no schema migration).
 _CODE_MARK_START = "\n\n[code]\n"
@@ -253,12 +248,17 @@ def synthesize_rules(store: IndexStore) -> int:
     for cat, count in rejects_by_cat.items():
         if count < _MIN_REJECTS_CATEGORY:
             continue
+        title = f"Raise the bar on {cat}"[:80]
+        body = (
+            f"This team frequently rejects '{cat}' suggestions ({count} rejections). "
+            f"Raise the bar significantly for this category — only flag clear, "
+            f"high-confidence issues."
+        )
+        packed = pack_learned_rule(title, body)
+        if not packed:
+            continue
         store.upsert_learned_rule(
-            rule_text=(
-                f"This team frequently rejects '{cat}' suggestions "
-                f"({count} rejections). Raise the bar significantly for this "
-                f"category — only flag clear, high-confidence issues."
-            ),
+            rule_text=packed,
             source_signal="reject_pattern",
             category=cat,
             path_pattern="",
@@ -274,11 +274,16 @@ def synthesize_rules(store: IndexStore) -> int:
         # Skip if already covered by a category-wide rule
         if rejects_by_cat.get(cat, 0) >= _MIN_REJECTS_CATEGORY:
             continue
+        title = f"Raise the bar on {cat} in {directory}"[:80]
+        body = (
+            f"Avoid '{cat}' comments on files in {directory}/ — this team has "
+            f"rejected {count} such suggestions."
+        )
+        packed = pack_learned_rule(title, body)
+        if not packed:
+            continue
         store.upsert_learned_rule(
-            rule_text=(
-                f"Avoid '{cat}' comments on files in {directory}/ "
-                f"— this team has rejected {count} such suggestions."
-            ),
+            rule_text=packed,
             source_signal="reject_pattern",
             category=cat,
             path_pattern=f"{directory}/**",
@@ -302,7 +307,7 @@ def _apply_create(
     path_hint: str = "",
     rejected_rows: list | None = None,
 ) -> bool:
-    rule_text = strip_synth_rationale(rule_text)
+    rule_text = (rule_text or "").strip()
     if not rule_text:
         return False
     norm = normalize_rule_text(rule_text)
@@ -362,10 +367,10 @@ def _apply_merge(
     if existing.status not in ("pending", "approved"):
         return False
 
-    rule_text = strip_synth_rationale(rule_text) if rule_text else ""
+    rule_text = (rule_text or "").strip()
     sample_count = max(evidence, int(existing.sample_count or 0), 1)
     new_text = rule_text if existing.status == "pending" and rule_text else None
-    # Pending: replace evidence with this action's PRs (old synth wrote batch-wide junk).
+    # Pending: replace evidence with this action's PRs.
     # Approved: union newly cited PRs.
     row = store.bump_learned_rule_evidence(
         target_id,
@@ -376,7 +381,7 @@ def _apply_merge(
     )
     if row is None:
         return False
-    by_text[_normalize_human_rule_text(row.rule_text)] = row
+    by_text[normalize_rule_text(row.rule_text)] = row
     return True
 
 
@@ -406,10 +411,10 @@ async def synthesize_from_human_reviews(
     on_progress=None,  # type: ignore[no-untyped-def]
     replace_pending: bool = False,
 ) -> int:
-    """Staged human-pattern synth: classify → extract → cluster → upsert.
+    """Staged human-pattern synth: extract → cluster → upsert.
 
     Collects ``human_review`` feedback (hunk-preferring sample), runs the
-    bounded multi-stage pipeline, and applies create/merge actions.
+    extract/cluster pipeline, and applies create/merge actions.
     Approved/rejected rule text stays frozen.
 
     When ``replace_pending`` is True (admin Rebuild / backfill end), auto-synth
@@ -515,7 +520,7 @@ async def synthesize_from_human_reviews(
     logger.info("Human synth upserted=%d", upserted)
     if on_progress:
         try:
-            on_progress({"phase": "complete", "upserted": upserted})
+            on_progress({"phase": "complete", "llm_rules": upserted})
         except Exception:
             logger.debug("Human synth progress callback failed", exc_info=True)
     return upserted

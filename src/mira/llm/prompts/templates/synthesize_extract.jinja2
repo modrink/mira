@@ -7,41 +7,24 @@ Respond in JSON only. No markdown fences.
     {
       "index": 1,
       "title": "short imperative title (≤80 chars)",
-      "body": "markdown body (see shape below)",
+      "body": "1–3 sentences: when this applies, preferred approach, and any concrete cue to flag in a diff",
       "path_hint": "directory glob only (e.g. src/** or migrations/**), or \"\"",
       "prs": [1201]
     }
   ]
 }
 
-Body shape (markdown):
-1. Context — 1–3 sentences: when this applies and why, grounded in the comment. Name the rejected construct and the preferred one.
-2. Evidence — when a code hunk is present, include short before/after (or rejected snippet) fenced blocks from that evidence. Omit rather than invent. If a hunk is present but you cannot quote any concrete snippet, omit this comment from extractions.
-3. Detector — final line must be exactly: Look for: <the SMELL / rejected construct>
-
-Detector rules (critical):
-- Look for the BAD thing a reviewer should flag — not the preferred fix.
-  - Good: `Look for: float columns in money/amount migrations`
-  - Bad: `Look for: decimal` (that is the fix)
-  - Good: `Look for: collection.count() after loading a full relation in memory`
-  - Bad: `Look for: relation().count()` (that is the preferred query)
-  - Good: `Look for: curl / curl_* in application code`
-  - Bad: `Look for: SharedHttpClient` (one-off class name)
-- Detector must be concrete enough to match in a diff (token, call, attribute, pattern). Not "unused values", "large objects", "non-standard names", "nullable properties".
-
-Title rules:
-- Imperative and specific. No "Consider…", "Ensure…", "Try to…".
+Rules:
+- Soft / org conventions are fine. Admins will approve or reject later.
+- Put concrete cues (token, call, pattern) in the body when the comment has them.
+- When a code hunk is present, you may quote short before/after fences in body. Omit rather than invent.
+- Title: imperative when possible. Soft titles OK.
 - Do not invent package names or APIs absent from the comment/hunk.
+- Omit from `extractions` only when there is no coding guidance (pure question / LGTM / workflow).
 
-Omit from `extractions` when:
-- soft mush / maintainability slogans / trait-or-stylesheet extraction advice
-- cleanup without a named smell ("remove unused enum")
-- hunk present but no quotable evidence
-- no coding guidance
-
-`path_hint` rules:
-- Prefer `""` (repo-wide). Most coding smells apply everywhere.
-- Only set a shallow directory glob (≤2 segments, e.g. `src/**`, `migrations/**`, `tests/**`) when the smell is inherently area-bound.
+`path_hint`:
+- Prefer `""` (repo-wide).
+- Only set a shallow directory glob (≤2 segments) when the preference is inherently area-bound.
 - NEVER copy the comment's deep folder. NEVER a single filename.
 `prs` = that comment's PR number when known.
 

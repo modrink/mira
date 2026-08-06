@@ -368,10 +368,9 @@ async def test_synthesize_repo_with_progress_writes_complete(
 
     async def fake_synth(owner, repo, platform="github", *, on_progress=None):
         if on_progress:
-            on_progress({"phase": "classify", "classify_done": 1, "classify_total": 1})
             on_progress({"phase": "extract", "extract_done": 2, "extract_total": 2})
             on_progress({"phase": "cluster"})
-            on_progress({"phase": "complete", "upserted": 1})
+            on_progress({"phase": "complete", "llm_rules": 1})
         return {"deterministic_rules": 0, "llm_rules": 1}
 
     with patch(

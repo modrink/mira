@@ -43,11 +43,12 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 ## Learning from feedback
 
 - `@miracodeai reject` thread resolution with feedback-event recording
-- Deterministic rule synthesis from reject signals
-- LLM-powered synthesis of human review patterns from merged PRs (extracts recurring themes from human reviewer comments)
-- Historical learnings backfill: admin **Backfill** on Rules → Active (or `mira backfill-learnings`) replays merge-time learning over recent merged PRs
+- Deterministic titled rules from reject signals (`reject_pattern`)
+- LLM synthesis of human review patterns (extract → cluster against the catalog): titled `title` + `body` rules land in **Pending** for admin approve/reject
+- Admin **Rebuild learnings** (re-synth without re-fetch) and **Backfill** on Rules → Pending/Active (or `mira backfill-learnings` / `mira synthesize-learnings`)
+- `@bot remember <rule>` captures a pending learning
+- Approved learned rules inject into future reviews (path-scoped when set)
 - Feedback stats API for inspecting the learning loop
-- Synthesized rules inject into future reviews automatically
 
 ## Platform integrations
 

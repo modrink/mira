@@ -17,26 +17,21 @@ from mira.analysis.feedback import (
     synthesize_from_human_reviews,
     synthesize_rules,
 )
+from mira.analysis.learned_rules import pack_learned_rule, unpack_learned_rule
 from mira.index.store import FeedbackEventRow, IndexStore
 from mira.models import BotThreadRecord, HumanReviewComment
 from mira.providers.github import parse_bot_comment_metadata
 
 
 def _staged_llm_complete(cluster_payload: dict | str):
-    """Mock llm.complete for classify → extract → cluster."""
+    """Mock llm.complete for extract → cluster."""
     cluster_json = (
         cluster_payload if isinstance(cluster_payload, str) else json.dumps(cluster_payload)
     )
 
     async def _complete(**kwargs):
         prompt = kwargs["messages"][0]["content"]
-        if "classifying human code-review comments" in prompt:
-            idxs = [int(m) for m in re.findall(r"^### (\d+) —", prompt, re.M)]
-            return json.dumps({"results": [{"index": i, "decision": "EXTRACT"} for i in idxs]})
-        if (
-            "extract one titled coding rule" in prompt
-            or "extract one structured coding rule" in prompt
-        ):
+        if "extract one titled coding rule" in prompt:
             idxs = [int(m) for m in re.findall(r"^### (\d+) —", prompt, re.M)]
             return json.dumps(
                 {
@@ -45,8 +40,7 @@ def _staged_llm_complete(cluster_payload: dict | str):
                             "index": idx,
                             "title": "Apply the team pattern",
                             "body": (
-                                "Follow the rejected approach replacement called out in review.\n\n"
-                                "Look for: the rejected approach in new application code"
+                                "Follow the rejected approach replacement called out in review."
                             ),
                             "path_hint": "",
                             "prs": [],
@@ -58,6 +52,51 @@ def _staged_llm_complete(cluster_payload: dict | str):
         return cluster_json
 
     return _complete
+
+
+def _create(
+    title: str,
+    *,
+    body: str | None = None,
+    evidence_count: int = 2,
+    prs: list[int] | None = None,
+    path_hint: str = "",
+) -> dict:
+    """Titled create action for synth mocks."""
+    out: dict = {
+        "action": "create",
+        "title": title,
+        "body": body or f"{title}.",
+        "evidence_count": evidence_count,
+        "path_hint": path_hint,
+    }
+    if prs is not None:
+        out["prs"] = prs
+    return out
+
+
+def _merge(
+    target_id: int,
+    *,
+    evidence_count: int = 2,
+    title: str = "",
+    body: str = "",
+    prs: list[int] | None = None,
+) -> dict:
+    """Merge action; empty title/body keeps existing text."""
+    out: dict = {
+        "action": "merge",
+        "target_id": target_id,
+        "evidence_count": evidence_count,
+    }
+    if title:
+        out["title"] = title
+    if body:
+        out["body"] = body
+    if prs is not None:
+        out["prs"] = prs
+    return out
+
 
 
 @pytest.fixture
@@ -370,6 +409,22 @@ class TestSynthesizeRules:
         assert evidence >= {"10", "11", "12", "13", "14"}
 
 
+    def test_reject_pattern_is_titled_for_inject(self, store):
+        from mira.analysis.learned_rules import select_learned_rules, unpack_learned_rule
+
+        for i in range(5):
+            _fb(store, signal="rejected", category="style", pr=i)
+        assert synthesize_rules(store) >= 1
+        rules = [r for r in store.list_learned_rules() if r.source_signal == "reject_pattern"]
+        assert rules
+        title, body = unpack_learned_rule(rules[0].rule_text)
+        assert title.startswith("Raise the bar on")
+        assert body
+        injected = select_learned_rules(rules, ["src/auth.py"])
+        assert injected
+        assert injected[0]["title"] == title
+
+
 class TestLlmSynthCooldown:
     def test_elapsed_when_never_ran(self, store):
         assert llm_synth_cooldown_elapsed(store) is True
@@ -414,49 +469,42 @@ class TestSynthesizeFromHumanReviews:
         llm.complete.side_effect = _staged_llm_complete(
             {
                 "actions": [
-                    {
-                        "action": "create",
-                        "rule": "Flag raw SQL queries outside the data layer.",
-                        "rationale": "Reviewers consistently pushed back on them.",
-                        "evidence_count": 3,
-                        "prs": [1, 2, 99],
-                    },
-                    {
-                        "action": "create",
-                        "rule": "Prefer async/await over callback patterns.",
-                        "rationale": "Team style.",
-                        "evidence_count": 2,
-                        "prs": [3],
-                    },
+                    _create(
+                        "Flag raw SQL queries outside the data layer",
+                        evidence_count=3,
+                        prs=[1, 2, 99],
+                    ),
+                    _create(
+                        "Prefer async/await over callback patterns",
+                        evidence_count=2,
+                        prs=[3],
+                    ),
                 ]
             }
         )
 
         n = await synthesize_from_human_reviews(store, llm)
         assert n == 2
-        assert llm.complete.await_count >= 3
+        assert llm.complete.await_count >= 2
         # Verify stored as human_pattern source
         rules = store.list_learned_rules()
         human_rules = [r for r in rules if r.source_signal == "human_pattern"]
         assert len(human_rules) == 2
         assert all(r.path_pattern.startswith("__human_") for r in human_rules)
-        # Rationale must not be glued into rule_text.
-        assert all("(" not in r.rule_text for r in human_rules)
-        # Evidence PRs are per-action (validated against batch), not the whole window.
         by_text = {r.rule_text: r for r in human_rules}
-        sql = by_text["Flag raw SQL queries outside the data layer."]
-        assert sql.evidence_prs == "1,2"
-        assert sql.sample_count == 3
-        async_rule = by_text["Prefer async/await over callback patterns."]
-        assert async_rule.evidence_prs == "3"
-        assert async_rule.sample_count == 2
-        # Cluster prompt includes catalog; classify/extract include PR markers.
+        sql_key = next(k for k in by_text if "Flag raw SQL" in k)
+        assert by_text[sql_key].evidence_prs == "1,2"
+        assert by_text[sql_key].sample_count == 3
+        async_key = next(k for k in by_text if "async/await" in k)
+        assert by_text[async_key].evidence_prs == "3"
+        assert by_text[async_key].sample_count == 2
+        # Cluster prompt includes catalog; extract includes PR markers.
         prompts = [c.kwargs["messages"][0]["content"] for c in llm.complete.await_args_list]
         assert any("Existing catalog" in p for p in prompts)
         assert any("PR #" in p for p in prompts)
 
     @pytest.mark.asyncio
-    async def test_on_progress_emits_classify_extract_cluster(self, store):
+    async def test_on_progress_emits_extract_cluster(self, store):
         for i in range(3):
             store.record_feedback(
                 pr_number=i + 1,
@@ -484,10 +532,7 @@ class TestSynthesizeFromHumanReviews:
                     {
                         "action": "create",
                         "title": "Catch specific exceptions",
-                        "body": (
-                            "Prefer named exception types over bare except.\n\n"
-                            "Look for: bare except clauses"
-                        ),
+                        "body": "Prefer named exception types over bare except.",
                         "evidence_count": 3,
                         "prs": [1, 2, 3],
                     }
@@ -496,7 +541,7 @@ class TestSynthesizeFromHumanReviews:
         )
         n = await synthesize_from_human_reviews(store, llm, on_progress=on_progress)
         assert n == 1
-        assert "classify" in phases
+        assert "classify" not in phases
         assert "extract" in phases
         assert "cluster" in phases
         assert phases[-1] == "complete"
@@ -524,8 +569,7 @@ class TestSynthesizeFromHumanReviews:
                         "title": "Wrap multi-write requests in a transaction",
                         "body": (
                             "Wrap related DB writes in a single transaction instead of "
-                            "partial commits.\n\n"
-                            "Look for: multi-write requests without a transaction"
+                            "partial commits."
                         ),
                         "evidence_count": 3,
                         "prs": [1, 2],
@@ -533,18 +577,21 @@ class TestSynthesizeFromHumanReviews:
                     {
                         "action": "create",
                         "title": "Use camelCase for consistency",
-                        "body": "Prefer camelCase.\n\nLook for: snake_case names",
+                        "body": "Prefer camelCase.",
                         "evidence_count": 2,
                     },
                 ]
             }
         )
         n = await synthesize_from_human_reviews(store, llm)
-        assert n == 1
+        # Soft conventions are kept (admins filter); both creates land.
+        assert n == 2
         human = [r for r in store.list_learned_rules() if r.source_signal == "human_pattern"]
-        assert len(human) == 1
-        assert "Wrap multi-write requests in a transaction" in human[0].rule_text
-        assert "Look for: multi-write requests without a transaction" in human[0].rule_text
+        assert len(human) == 2
+        texts = "\n".join(r.rule_text for r in human)
+        assert "Wrap multi-write requests in a transaction" in texts
+        assert "partial commits" in texts
+        assert "Use camelCase for consistency" in texts
         prompts = [c.kwargs["messages"][0]["content"] for c in llm.complete.await_args_list]
         assert any('"title"' in p for p in prompts)
         assert any('"body"' in p for p in prompts)
@@ -563,12 +610,15 @@ class TestSynthesizeFromHumanReviews:
                 signal="human_review",
                 actor="alice",
             )
-        # Legacy slot-style approved rule must stay untouched.
+        # Approved rule must stay untouched.
         approved = store.upsert_learned_rule(
-            rule_text="Keep using approved rule text forever.",
+            rule_text=pack_learned_rule(
+                "Keep approved text",
+                "Frozen approved learning.",
+            ),
             source_signal="human_pattern",
             category="human_review",
-            path_pattern="__llm_pattern_0__",
+            path_pattern="__human_approved__",
             sample_count=10,
             status="approved",
         )
@@ -578,18 +628,14 @@ class TestSynthesizeFromHumanReviews:
         llm.complete.side_effect = _staged_llm_complete(
             {
                 "actions": [
-                    {
-                        "action": "create",
-                        "rule": "Brand new research finding about logging.",
-                        "rationale": "Seen across PRs.",
-                        "evidence_count": 4,
-                    },
-                    {
-                        "action": "create",
-                        "rule": "Another distinct finding about retries.",
-                        "rationale": "Repeated feedback.",
-                        "evidence_count": 3,
-                    },
+                    _create(
+                        "Brand new research finding about logging",
+                        evidence_count=4,
+                    ),
+                    _create(
+                        "Another distinct finding about retries",
+                        evidence_count=3,
+                    ),
                 ]
             }
         )
@@ -601,7 +647,7 @@ class TestSynthesizeFromHumanReviews:
         assert len(human) == 3
         kept = store.get_learned_rule(approved.id)
         assert kept is not None
-        assert kept.rule_text == "Keep using approved rule text forever."
+        assert "Keep approved text" in kept.rule_text
         assert kept.status == "approved"
         pending = [r for r in human if r.status == "pending"]
         assert len(pending) == 2
@@ -625,12 +671,10 @@ class TestSynthesizeFromHumanReviews:
             )
         payload = {
             "actions": [
-                {
-                    "action": "create",
-                    "rule": "Prefer named constants over magic numbers.",
-                    "rationale": "Reviewers asked for it.",
-                    "evidence_count": 2,
-                }
+                _create(
+                    "Prefer named constants over magic numbers",
+                    evidence_count=2,
+                )
             ]
         }
         llm = AsyncMock()
@@ -660,7 +704,10 @@ class TestSynthesizeFromHumanReviews:
                 actor="u",
             )
         approved = store.upsert_learned_rule(
-            rule_text="Always validate auth tokens at the edge.",
+            rule_text=pack_learned_rule(
+                "Always validate auth tokens at the edge",
+                "Check tokens at the edge.",
+            ),
             source_signal="human_pattern",
             category="human_review",
             path_pattern="__human_abc__",
@@ -671,19 +718,19 @@ class TestSynthesizeFromHumanReviews:
         llm.complete.side_effect = _staged_llm_complete(
             {
                 "actions": [
-                    {
-                        "action": "merge",
-                        "target_id": approved.id,
-                        "rule": "Should not overwrite approved text.",
-                        "evidence_count": 9,
-                    }
+                    _merge(
+                        approved.id,
+                        title="Should not overwrite approved text",
+                        body="This rewrite must not apply.",
+                        evidence_count=9,
+                    )
                 ]
             }
         )
         assert await synthesize_from_human_reviews(store, llm) == 1
         kept = store.get_learned_rule(approved.id)
         assert kept is not None
-        assert kept.rule_text == "Always validate auth tokens at the edge."
+        assert "Always validate auth tokens at the edge" in kept.rule_text
         assert kept.sample_count == 9
         assert kept.status == "approved"
 
@@ -702,30 +749,38 @@ class TestSynthesizeFromHumanReviews:
                 actor="u",
             )
         pending = store.upsert_learned_rule(
-            rule_text="Old pending wording.",
+            rule_text=pack_learned_rule(
+                "Old pending wording",
+                "Temporary pending text.",
+            ),
             source_signal="human_pattern",
             category="human_review",
             path_pattern="__human_pending__",
             sample_count=1,
             status="pending",
         )
+        improved = pack_learned_rule(
+                "Improved pending wording",
+                "Sharper pending text.",
+            )
+        title, body = unpack_learned_rule(improved)
         llm = AsyncMock()
         llm.complete.side_effect = _staged_llm_complete(
             {
                 "actions": [
-                    {
-                        "action": "merge",
-                        "target_id": pending.id,
-                        "rule": "Improved pending wording.",
-                        "evidence_count": 4,
-                    }
+                    _merge(
+                        pending.id,
+                        title=title,
+                        body=body,
+                        evidence_count=4,
+                    )
                 ]
             }
         )
         assert await synthesize_from_human_reviews(store, llm) == 1
         got = store.get_learned_rule(pending.id)
         assert got is not None
-        assert got.rule_text == "Improved pending wording."
+        assert got.rule_text == improved
         assert got.sample_count == 4
         assert got.status == "pending"
 
@@ -792,15 +847,11 @@ class TestSynthesizeFromHumanReviews:
         llm.complete.side_effect = _staged_llm_complete(
             {
                 "actions": [
-                    {
-                        "action": "create",
-                        "title": "Flag bare except",
-                        "body": (
-                            "Catch named exceptions instead of bare except.\n\n"
-                            "Look for: bare except clauses"
-                        ),
-                        "evidence_count": 2,
-                    }
+                    _create(
+                        "Flag bare except",
+                        body="Catch named exceptions instead of bare except.",
+                        evidence_count=2,
+                    )
                 ]
             }
         )
@@ -825,10 +876,9 @@ class TestSynthesizeFromHumanReviews:
                 actor="u",
             )
         rejected = store.upsert_learned_rule(
-            rule_text=(
-                "Flag bare except clauses\n\n"
-                "Catch named exceptions.\n\n"
-                "Look for: bare except clauses"
+            rule_text=pack_learned_rule(
+                "Flag bare except clauses",
+                "Catch named exceptions.",
             ),
             source_signal="human_pattern",
             category="human_review",
@@ -841,12 +891,11 @@ class TestSynthesizeFromHumanReviews:
         llm.complete.side_effect = _staged_llm_complete(
             {
                 "actions": [
-                    {
-                        "action": "create",
-                        "title": "Flag bare except clauses",
-                        "body": ("Catch named exceptions.\n\nLook for: bare except clauses"),
-                        "evidence_count": 3,
-                    }
+                    _create(
+                        "Flag bare except clauses",
+                        body="Catch named exceptions.",
+                        evidence_count=3,
+                    )
                 ]
             }
         )
@@ -869,7 +918,7 @@ class TestSynthesizeFromHumanReviews:
                 actor="u",
             )
         llm = AsyncMock()
-        # Classify fails JSON → no EXTRACT → zero upserts.
+        # Extract returns bad JSON → zero upserts.
         llm.complete.return_value = "this is not json"
         assert await synthesize_from_human_reviews(store, llm) == 0
 
@@ -1123,12 +1172,10 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
         side_effect=_staged_llm_complete(
             {
                 "actions": [
-                    {
-                        "action": "create",
-                        "rule": "Avoid raw SQL queries outside the data-access layer.",
-                        "rationale": "Reviewers consistently push back on them.",
-                        "evidence_count": 2,
-                    },
+                    _create(
+                        "Avoid raw SQL queries outside the data-access layer",
+                        evidence_count=2,
+                    ),
                 ]
             }
         )
@@ -1180,8 +1227,8 @@ async def test_handle_pr_merged_end_to_end(tmp_path, monkeypatch):
     # Original rejected event still present and not duplicated.
     assert len(by_signal["rejected"]) == 1
 
-    # LLM was invoked for staged synth (classify + extract + cluster).
-    assert fake_llm.complete.await_count >= 3
+    # LLM was invoked for staged synth (extract + cluster).
+    assert fake_llm.complete.await_count >= 2
 
     # One human_pattern rule stored.
     rules = store.list_learned_rules()

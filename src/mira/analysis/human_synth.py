@@ -1,11 +1,10 @@
-"""Bounded multi-stage human-pattern synthesis (classify → extract → cluster)."""
+"""Human-pattern synthesis: extract → cluster."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -23,10 +22,8 @@ logger = logging.getLogger(__name__)
 
 _TEMPLATE_DIR = Path(__file__).parent.parent / "llm" / "prompts" / "templates"
 
-_EXTRACT_CAP = int(os.environ.get("MIRA_HUMAN_SYNTH_EXTRACT_CAP", "25"))
-_CLASSIFY_BATCH = int(os.environ.get("MIRA_HUMAN_SYNTH_CLASSIFY_BATCH", "25"))
+_EXTRACT_CAP = int(os.environ.get("MIRA_HUMAN_SYNTH_EXTRACT_CAP", "80"))
 _EXTRACT_BATCH = int(os.environ.get("MIRA_HUMAN_SYNTH_EXTRACT_BATCH", "10"))
-_CONCRETE_TOKEN_RE = re.compile(r"`[^`]+`|\(\)|->|::|\.\w+\(")
 
 ProgressCb = Callable[[dict[str, Any]], None]
 
@@ -80,81 +77,17 @@ async def _llm_json(llm: Any, prompt: str) -> dict | None:
         return None
 
 
-def comments_for_prompt(comments: list[dict]) -> list[dict]:
-    """Attach 1-based index fields for classify/extract prompts."""
-    out = []
-    for i, c in enumerate(comments, start=1):
-        out.append({**c, "index": i})
-    return out
-
-
-async def classify_comments(
-    llm: Any,
-    comments: list[dict],
-    *,
-    on_progress: ProgressCb | None = None,
-) -> set[int]:
-    """Return 1-based indexes marked EXTRACT."""
-    if not comments:
-        return set()
-    env = _jinja_env()
-    template = env.get_template("synthesize_classify.jinja2")
-    extract_ids: set[int] = set()
-    indexed = comments_for_prompt(comments)
-    batch_size = max(1, _CLASSIFY_BATCH)
-    total_batches = max(1, (len(indexed) + batch_size - 1) // batch_size)
-    _emit(
-        on_progress,
-        phase="classify",
-        classify_done=0,
-        classify_total=total_batches,
-    )
-    done = 0
-    for start in range(0, len(indexed), batch_size):
-        batch = indexed[start : start + batch_size]
-        prompt = template.render(comments=batch)
-        data = await _llm_json(llm, prompt)
-        if data:
-            results = data.get("results")
-            if isinstance(results, list):
-                for item in results:
-                    if not isinstance(item, dict):
-                        continue
-                    try:
-                        idx = int(item.get("index"))
-                    except (TypeError, ValueError):
-                        continue
-                    decision = str(item.get("decision") or "").strip().upper()
-                    if decision == "EXTRACT":
-                        extract_ids.add(idx)
-        done += 1
-        _emit(
-            on_progress,
-            phase="classify",
-            classify_done=done,
-            classify_total=total_batches,
-        )
-    return extract_ids
-
-
-def _prefer_hunk_then_cap(
-    comments: list[dict],
-    extract_indexes: set[int],
-    *,
-    cap: int,
-) -> list[dict]:
-    """Pick EXTRACT comments for extract stage; hunk-bearing first, then cap."""
-    chosen: list[dict] = []
+def _comments_for_extract(comments: list[dict], *, cap: int) -> list[dict]:
+    """Index comments; prefer hunk-bearing; cap count."""
     with_hunk: list[dict] = []
     without: list[dict] = []
     for i, c in enumerate(comments, start=1):
-        if i not in extract_indexes:
-            continue
         row = {**c, "index": i}
         if (c.get("code") or "").strip():
             with_hunk.append(row)
         else:
             without.append(row)
+    chosen: list[dict] = []
     for row in with_hunk + without:
         chosen.append(row)
         if len(chosen) >= cap:
@@ -181,7 +114,6 @@ async def extract_candidates(
     dropped = 0
     total = len(comments)
     _emit(on_progress, phase="extract", extract_done=0, extract_total=total)
-    processed = 0
     for start in range(0, len(comments), max(1, _EXTRACT_BATCH)):
         batch = comments[start : start + _EXTRACT_BATCH]
         prompt = template.render(comments=batch)
@@ -199,24 +131,15 @@ async def extract_candidates(
                     src = by_index.get(idx)
                     if src is None:
                         continue
-                    # Default prs to this comment's PR when model omits them.
                     prs = item.get("prs")
                     if not isinstance(prs, list) or not prs:
                         prn = int(src.get("pr_number") or 0)
                         item = {**item, "prs": [prn] if prn > 0 else []}
-                    if not str(item.get("path_hint") or "").strip() and src.get("path"):
-                        pass  # do not invent globs from a single path
                     rule_text = rule_text_from_synth_action(item)
                     if not rule_text:
                         dropped += 1
                         continue
                     title, body = unpack_learned_rule(rule_text)
-                    # Hunk present but no fenced evidence and no concrete token → drop.
-                    if (src.get("code") or "").strip() and (
-                        "```" not in body and not _CONCRETE_TOKEN_RE.search(body)
-                    ):
-                        dropped += 1
-                        continue
                     survivors.append(
                         {
                             "id": len(survivors) + 1,
@@ -270,18 +193,6 @@ async def cluster_candidates(
         return []
     actions = data.get("actions")
     if not isinstance(actions, list):
-        # Legacy {"rules": [...]}
-        legacy = data.get("rules")
-        if isinstance(legacy, list):
-            return [
-                {
-                    "action": "create",
-                    "rule": item.get("rule") if isinstance(item, dict) else "",
-                    "evidence_count": item.get("evidence_count") if isinstance(item, dict) else 0,
-                    "prs": item.get("prs") if isinstance(item, dict) else [],
-                }
-                for item in legacy
-            ]
         return []
     return [a for a in actions if isinstance(a, dict)]
 
@@ -296,28 +207,12 @@ async def run_staged_human_synth(
     on_progress: ProgressCb | None = None,
     rejected: list[dict] | None = None,
 ) -> list[dict]:
-    """Full classify → extract → cluster pipeline. Returns action dicts."""
+    """Extract → cluster. Returns action dicts."""
     if len(comments) < 2:
         return []
 
     cap = _EXTRACT_CAP if extract_cap is None else extract_cap
-    extract_ids = await classify_comments(llm, comments, on_progress=on_progress)
-    logger.info(
-        "Human synth classify: comments=%d extract=%d",
-        len(comments),
-        len(extract_ids),
-    )
-    if not extract_ids:
-        _emit(
-            on_progress,
-            phase="complete",
-            classified=len(comments),
-            extract=0,
-            dropped_gate=0,
-        )
-        return []
-
-    to_extract = _prefer_hunk_then_cap(comments, extract_ids, cap=max(1, cap))
+    to_extract = _comments_for_extract(comments, cap=max(1, cap))
     survivors, dropped = await extract_candidates(llm, to_extract, on_progress=on_progress)
     logger.info(
         "Human synth extract: attempted=%d survived=%d dropped_gate=%d",
@@ -326,13 +221,7 @@ async def run_staged_human_synth(
         dropped,
     )
     if not survivors:
-        _emit(
-            on_progress,
-            phase="complete",
-            classified=len(comments),
-            extract=0,
-            dropped_gate=dropped,
-        )
+        _emit(on_progress, phase="complete", llm_rules=0)
         return []
 
     _emit(on_progress, phase="cluster")
@@ -344,11 +233,5 @@ async def run_staged_human_synth(
         rejected=rejected,
     )
     logger.info("Human synth cluster: actions=%d", len(actions))
-    _emit(
-        on_progress,
-        phase="cluster",
-        classified=len(comments),
-        extract=len(survivors),
-        dropped_gate=dropped,
-    )
+    _emit(on_progress, phase="cluster")
     return actions

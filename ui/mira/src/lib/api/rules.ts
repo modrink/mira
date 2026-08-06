@@ -1,17 +1,10 @@
-import { deleteJson, fetchJson, patchJson, postJson, putJson } from "./http"
+import { fetchJson, patchJson, postJson, putJson } from "./http"
 import type {
-  LearnedRuleModel,
-  OrgLearnedRuleModel,
-  RuleModel,
   UnifiedRule,
   UnifiedRuleCreate,
   UnifiedRuleKind,
   UnifiedRuleRef,
 } from "./types"
-
-function platformQs(platform?: string) {
-  return platform ? `?platform=${encodeURIComponent(platform)}` : ""
-}
 
 function unifiedListQs(params: {
   mode: "pending" | "active"
@@ -29,7 +22,7 @@ function unifiedListQs(params: {
   return `?${sp.toString()}`
 }
 
-// Custom rules (global + per-repo) and learned rules.
+// Custom rules (global + per-repo) and learned rules — unified surface only.
 export const rulesApi = {
   listUnifiedRules: (params: {
     mode: "pending" | "active"
@@ -74,67 +67,6 @@ export const rulesApi = {
   setUnifiedRuleEnabled: (body: UnifiedRuleRef & { enabled: boolean }) =>
     patchJson<UnifiedRule>("/api/rules/enabled", body),
 
-  // Learned rules. status: "approved" | "pending" | "rejected" | "" (all)
-  listLearnedRules: (status = "") =>
-    fetchJson<OrgLearnedRuleModel[]>(
-      status ? `/api/learned-rules?status=${encodeURIComponent(status)}` : `/api/learned-rules`
-    ),
-
-  getLearnedRule: (owner: string, repo: string, id: number, platform?: string) =>
-    fetchJson<OrgLearnedRuleModel>(
-      `/api/learned-rules/${owner}/${repo}/${id}${platformQs(platform)}`
-    ),
-
-  approveLearnedRule: (owner: string, repo: string, id: number, platform?: string) =>
-    postJson<{ ok: boolean }>(
-      `/api/learned-rules/${owner}/${repo}/${id}/approve${platformQs(platform)}`,
-      {}
-    ),
-
-  rejectLearnedRule: (owner: string, repo: string, id: number, platform?: string) =>
-    postJson<{ ok: boolean }>(
-      `/api/learned-rules/${owner}/${repo}/${id}/reject${platformQs(platform)}`,
-      {}
-    ),
-
-  setLearnedRuleActive: (
-    owner: string,
-    repo: string,
-    id: number,
-    active: boolean,
-    platform?: string
-  ) =>
-    patchJson<{ ok: boolean }>(
-      `/api/learned-rules/${owner}/${repo}/${id}/active${platformQs(platform)}`,
-      { active }
-    ),
-
-  createLearnedRule: (
-    owner: string,
-    repo: string,
-    body: { rule_text: string; category: string; path_pattern?: string },
-    platform?: string
-  ) =>
-    postJson<LearnedRuleModel>(
-      `/api/learned-rules/${owner}/${repo}${platformQs(platform)}`,
-      body
-    ),
-
-  updateLearnedRule: (
-    owner: string,
-    repo: string,
-    id: number,
-    body: { rule_text: string; category: string; path_pattern?: string },
-    platform?: string
-  ) =>
-    putJson<{ ok: boolean }>(
-      `/api/learned-rules/${owner}/${repo}/${id}${platformQs(platform)}`,
-      body
-    ),
-
-  deleteLearnedRule: (owner: string, repo: string, id: number, platform?: string) =>
-    deleteJson(`/api/learned-rules/${owner}/${repo}/${id}${platformQs(platform)}`),
-
   refreshLearnings: (body?: {
     repos?: { owner: string; repo: string }[]
     max_prs?: number
@@ -171,13 +103,9 @@ export const rulesApi = {
         total?: number
         max_prs?: number
         skipped?: number
-        accepted?: number
         human_recorded?: number
         deterministic_rules?: number
         llm_rules?: number
-        upserted?: number
-        classify_done?: number
-        classify_total?: number
         extract_done?: number
         extract_total?: number
         updated_at?: number
@@ -206,48 +134,4 @@ export const rulesApi = {
       basis: string
     }>(`/api/learnings/backfill/estimate?${sp.toString()}`)
   },
-
-  // Global rules
-  listGlobalRules: () => fetchJson<RuleModel[]>("/api/rules/global"),
-
-  createGlobalRule: (title: string, content: string) =>
-    postJson<RuleModel>("/api/rules/global", { title, content }),
-
-  updateGlobalRule: (id: number, title: string, content: string) =>
-    putJson<RuleModel>(`/api/rules/global/${id}`, { title, content }),
-
-  deleteGlobalRule: (id: number) => deleteJson(`/api/rules/global/${id}`),
-
-  toggleGlobalRule: (id: number) =>
-    patchJson<RuleModel>(`/api/rules/global/${id}/toggle`),
-
-  // Per-repo rules
-  listRepoRules: (owner: string, repo: string) =>
-    fetchJson<RuleModel[]>(`/api/repos/${owner}/${repo}/rules`),
-
-  createRepoRule: (
-    owner: string,
-    repo: string,
-    title: string,
-    content: string
-  ) =>
-    postJson<RuleModel>(`/api/repos/${owner}/${repo}/rules`, {
-      title,
-      content,
-    }),
-
-  updateRepoRule: (
-    owner: string,
-    repo: string,
-    id: number,
-    title: string,
-    content: string
-  ) =>
-    putJson<RuleModel>(`/api/repos/${owner}/${repo}/rules/${id}`, {
-      title,
-      content,
-    }),
-
-  deleteRepoRule: (owner: string, repo: string, id: number) =>
-    deleteJson(`/api/repos/${owner}/${repo}/rules/${id}`),
 }

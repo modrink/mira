@@ -323,7 +323,7 @@ async def self_critique(
     Team-documented preferences (learned + custom rules) are surfaced to the
     critic so it doesn't drop comments that align with them as "style nits".
     Path-scoped learned rows (`learned_rule_rows`) are filtered per comment
-    path; flat `learned_rules` still apply globally (legacy / tests).
+    path; unscoped `learned_rules` apply globally.
 
     `indexing_llm`, when passed, is the caller's already-built indexing-tier
     provider; otherwise one is constructed from ``load_config()``.

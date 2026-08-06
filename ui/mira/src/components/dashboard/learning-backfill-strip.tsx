@@ -106,8 +106,7 @@ export function LearningBackfillStrip({
   const status = primary.status
   const phase = primary.phase || ""
   const rebuild = isSynthJob(primary)
-  const synthPhases =
-    phase === "classify" || phase === "extract" || phase === "cluster"
+  const synthPhases = phase === "extract" || phase === "cluster"
 
   let title = rebuild ? `Last rebuild · ${slug}` : `Last backfill · ${slug}`
   let meta = ""
@@ -170,7 +169,7 @@ export function LearningBackfillStrip({
     pillLabel = "Failed"
   } else if (status === "complete") {
     if (rebuild) {
-      const rules = primary.llm_rules ?? primary.upserted ?? 0
+      const rules = primary.llm_rules ?? 0
       meta = `Finished ${relativeTime(primary.updated_at ?? 0)} · ${rules} rules`
     } else {
       meta = `Finished ${relativeTime(primary.updated_at ?? 0)} · scanned ${done} PRs · ${neu} new · ${skipped} skipped`

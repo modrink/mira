@@ -92,13 +92,10 @@ def mark_repos_synth(db: Any, repos: list[tuple[str, str]]) -> None:
             error="",
             job="synth",
             phase="queued",
-            classify_done=0,
-            classify_total=0,
             extract_done=0,
             extract_total=0,
             deterministic_rules=0,
             llm_rules=0,
-            upserted=0,
         )
 
 
@@ -361,9 +358,7 @@ async def synthesize_repo_with_progress(
         status="running",
         error="",
         job="synth",
-        phase="synth",
-        classify_done=0,
-        classify_total=0,
+        phase="extract",
         extract_done=0,
         extract_total=0,
     )

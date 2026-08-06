@@ -64,7 +64,7 @@ def _from_repo_ctx(r: object, *, owner: str, repo: str, platform: str) -> Unifie
 
 
 def _from_learned(r: dict | object) -> UnifiedRule:
-    from mira.analysis.learned_rules import strip_synth_rationale, unpack_learned_rule
+    from mira.analysis.learned_rules import unpack_learned_rule
 
     if isinstance(r, dict):
         get = r.get
@@ -73,13 +73,9 @@ def _from_learned(r: dict | object) -> UnifiedRule:
         def get(k: str, default: object = "") -> object:
             return getattr(r, k, default)
 
-    raw = strip_synth_rationale(str(get("rule_text", "") or get("text", "") or ""))
+    raw = str(get("rule_text", "") or get("text", "") or "").strip()
     title, body = unpack_learned_rule(raw)
-    if not title:
-        title = ""
-        text = raw
-    else:
-        text = body
+    text = body if title else raw
     owner = str(get("owner", "") or "")
     repo = str(get("repo", "") or "")
     return UnifiedRule(
@@ -303,9 +299,7 @@ def create_unified_rule(body: UnifiedRuleCreate, request: Request) -> UnifiedRul
             raise HTTPException(status_code=400, detail="owner and repo required")
         from mira.analysis.learned_rules import pack_learned_rule
 
-        rule_text = (
-            pack_learned_rule(body.title, body.text) if (body.title or "").strip() else body.text
-        )
+        rule_text = pack_learned_rule(body.title, body.text)
         if not rule_text:
             raise HTTPException(status_code=400, detail="title and text required")
         created = legacy.create_learned_rule(
@@ -389,9 +383,7 @@ def update_unified_rule(body: UnifiedRuleUpdate, request: Request) -> UnifiedRul
     if body.kind == "learned":
         from mira.analysis.learned_rules import pack_learned_rule
 
-        packed = (
-            pack_learned_rule(body.title, body.text) if (body.title or "").strip() else body.text
-        )
+        packed = pack_learned_rule(body.title, body.text)
         if not packed:
             raise HTTPException(status_code=400, detail="title and text required")
         if scope_mode == "global":
